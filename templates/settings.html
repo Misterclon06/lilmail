@@ -137,6 +137,7 @@
                                 <label class="form-label">SMTP port</label>
                                 <input type="number" x-model.number="form.smtp_port" class="form-input"
                                        placeholder="587">
+                                <small>465 uses implicit TLS; any other port uses STARTTLS. Certificates are always verified for a server of its own.</small>
                             </div>
                         </details>
                         <div x-show="errorMsg" x-cloak class="alert alert--error" style="margin-top:10px;font-size:13px" x-text="errorMsg"></div>

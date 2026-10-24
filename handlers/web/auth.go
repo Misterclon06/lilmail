@@ -392,16 +392,35 @@ func (h *AuthHandler) CreateSMTPClientForAccount(entry AccountEntry) (*api.SMTPC
 		return nil, fmt.Errorf("decrypt password for %s: %w", entry.Email, err)
 	}
 
+	startTLS, skipVerify := smtpModeForAccount(entry, h.config)
 	client := api.NewSMTPClient(
 		entry.SMTPServer, entry.SMTPPort,
 		entry.Email, password,
-		h.config.SMTP.UseSTARTTLS,
+		startTLS,
 	)
 	if client == nil {
 		return nil, fmt.Errorf("failed to create SMTP client for %s", entry.Email)
 	}
-	client.SetInsecureSkipVerify(h.config.SMTP.InsecureSkipVerify)
+	client.SetInsecureSkipVerify(skipVerify)
 	return client, nil
+}
+
+// smtpModeForAccount picks the SMTP transport for an additional account.
+//
+// An account on the globally configured SMTP server uses the operator's
+// [smtp] use_starttls and insecure_skip_verify. An account with its own server
+// must not inherit them: the global use_starttls describes ONE server, so a
+// 465 (implicit TLS) account under use_starttls = true — or the reverse —
+// failed to send; and insecure_skip_verify, meant for the operator's own
+// self-signed server, would silently turn off certificate checking for a
+// third-party host. Such accounts get the port convention (465 = implicit TLS,
+// otherwise STARTTLS) and always verify certificates.
+func smtpModeForAccount(entry AccountEntry, cfg *config.Config) (startTLS, skipVerify bool) {
+	usesGlobal := strings.EqualFold(entry.SMTPServer, cfg.SMTP.Server) && entry.SMTPPort == cfg.SMTP.GetPort()
+	if usesGlobal {
+		return cfg.SMTP.UseSTARTTLS, cfg.SMTP.InsecureSkipVerify
+	}
+	return entry.SMTPPort != 465, false
 }
 
 // CalDAVClient returns a CalDAVClient authenticated for the current session.
