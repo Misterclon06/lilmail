@@ -31,10 +31,11 @@
 //	free text           -> OR HEADER SUBJECT w HEADER FROM w
 //	-term               -> NOT ( term )         (negation of any of the above)
 //
-// Free text deliberately searches only Subject and From (Roundcube's default
+// Free text searches only Subject and From by default (Roundcube's default
 // search_mods): header-only SEARCH is cheap on any IMAP server, while TEXT/BODY
-// scans every message body and is slow without a server-side FTS index. Use
-// body:/text: to opt into a full-text scan.
+// scans every message body and is slow without a server-side FTS index. The UI
+// can choose other fields per folder (see NormalizeSearchMods), and body:/text:
+// opt into a full-text scan for a single term.
 //
 // Multiple positive terms are ANDed (Gmail's default), which is the natural
 // semantics of a single imap.SearchCriteria: every populated field must match.
@@ -208,14 +209,97 @@ func sanitizeValue(s string) string {
 	return s
 }
 
-// parseSearchQuery turns a Gmail-style operator query into an IMAP search
+// searchFields are the free-text fields a user may select, in canonical order.
+var searchFields = []string{"subject", "from", "to", "cc", "body"}
+
+// defaultSearchMods is used when no (valid) selection is given.
+var defaultSearchMods = []string{"subject", "from"}
+
+// NormalizeSearchMods turns a comma-separated field list from the client
+// (e.g. "subject,from,body") into a de-duplicated whitelist in canonical
+// order. Unknown names are dropped; an empty result falls back to the default.
+// The names are never spliced into IMAP: they only select criteria built here.
+func NormalizeSearchMods(raw string) []string {
+	want := map[string]bool{}
+	for _, f := range strings.Split(raw, ",") {
+		want[strings.ToLower(strings.TrimSpace(f))] = true
+	}
+	var out []string
+	for _, f := range searchFields {
+		if want[f] {
+			out = append(out, f)
+		}
+	}
+	if len(out) == 0 {
+		return append([]string(nil), defaultSearchMods...)
+	}
+	return out
+}
+
+// fieldCriterion matches v in one selectable field.
+func fieldCriterion(field, v string) *imap.SearchCriteria {
+	c := imap.NewSearchCriteria()
+	if field == "body" {
+		c.Body = []string{v}
+	} else {
+		c.Header.Add(strings.ToUpper(field), v)
+	}
+	return c
+}
+
+// anyOf ORs the criteria together (IMAP OR is binary, so it nests). One
+// criterion is returned as-is.
+func anyOf(parts []*imap.SearchCriteria) *imap.SearchCriteria {
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	c := imap.NewSearchCriteria()
+	c.Or = [][2]*imap.SearchCriteria{{parts[0], anyOf(parts[1:])}}
+	return c
+}
+
+// textCriterion matches v in any of the selected fields.
+func textCriterion(v string, mods []string) *imap.SearchCriteria {
+	parts := make([]*imap.SearchCriteria, 0, len(mods))
+	for _, f := range mods {
+		parts = append(parts, fieldCriterion(f, v))
+	}
+	return anyOf(parts)
+}
+
+// andInto ANDs a criterion produced by textCriterion into crit. IMAP criteria
+// in one SearchCriteria are ANDed, but go-imap has no "list of sub-criteria",
+// so an OR group is appended as an Or pair and a single field is merged.
+func andInto(crit, grp *imap.SearchCriteria) {
+	if len(grp.Or) == 1 {
+		crit.Or = append(crit.Or, grp.Or[0])
+		return
+	}
+	for k, vs := range grp.Header {
+		for _, v := range vs {
+			crit.Header.Add(k, v)
+		}
+	}
+	crit.Body = append(crit.Body, grp.Body...)
+}
+
+// parseSearchQuery is parseSearchQueryMods with the default fields.
+func parseSearchQuery(query string) (*imap.SearchCriteria, string) {
+	return parseSearchQueryMods(query, nil)
+}
+
+// parseSearchQueryMods turns a Gmail-style operator query into an IMAP search
 // program. It returns the criteria to run and, if the query contained an
 // `in:<folder>` operator, the mailbox to search instead of the caller's
 // default (empty string means "no override").
 //
-// Free-text words, quoted phrases and unmappable operators match the Subject or
-// From header (see headerOr); each word is ANDed with the rest.
-func parseSearchQuery(query string) (*imap.SearchCriteria, string) {
+// Free-text words, quoted phrases and unmappable operators match any of mods
+// (default Subject or From); each word is ANDed with the rest. mods must come
+// from NormalizeSearchMods (nil means the default).
+func parseSearchQueryMods(query string, mods []string) (*imap.SearchCriteria, string) {
+	if len(mods) == 0 {
+		mods = defaultSearchMods
+	}
 	if len(query) > maxSearchQueryLen {
 		query = query[:maxSearchQueryLen]
 	}
@@ -321,9 +405,9 @@ func parseSearchQuery(query string) (*imap.SearchCriteria, string) {
 				continue
 			}
 			if t.neg {
-				crit.Not = append(crit.Not, headerOr(text))
+				crit.Not = append(crit.Not, textCriterion(text, mods))
 			} else {
-				crit.Or = append(crit.Or, headerOr(text).Or[0])
+				andInto(crit, textCriterion(text, mods))
 			}
 			continue
 		}
@@ -334,18 +418,6 @@ func parseSearchQuery(query string) (*imap.SearchCriteria, string) {
 	}
 
 	return crit, folderOverride
-}
-
-// headerOr matches v in the Subject or From header:
-// OR HEADER SUBJECT v HEADER FROM v. The returned criteria has exactly one Or pair.
-func headerOr(v string) *imap.SearchCriteria {
-	subj := imap.NewSearchCriteria()
-	subj.Header.Add("SUBJECT", v)
-	from := imap.NewSearchCriteria()
-	from.Header.Add("FROM", v)
-	c := imap.NewSearchCriteria()
-	c.Or = [][2]*imap.SearchCriteria{{subj, from}}
-	return c
 }
 
 // resolveSearchFolder maps an in:<folder> value to a mailbox name. Common

@@ -37,11 +37,12 @@
 //
 // Blocked URLs are stashed in data-blocked-* attributes and remote CSS
 // url()/@import are rewritten to about:blank. Neither is restored in place:
-// clicking "Display images" re-requests the message with ?images=1 and the
-// server renders it again with prepareEmailHTML(raw, true), which skips
-// blocking altogether (same approach as Roundcube's allow_remote). That way
-// backgrounds, remote stylesheets and <link> assets come back too, not only
-// <img>. Inline data: URIs (embedded/contact-photo images) and cid:/relative
+// clicking "Display images" points the iframe at /api/email/:id/body?images=1
+// (HandleEmailBody), which renders prepareEmailHTML(raw, true) — no blocking at
+// all, same approach as Roundcube's allow_remote — so backgrounds, remote
+// stylesheets and <link> assets come back too, not only <img>. It must be a real
+// URL, not srcdoc: a srcdoc document inherits the app's CSP (img-src 'self'
+// data: blob:) and could never load remote content. Inline data: URIs (embedded/contact-photo images) and cid:/relative
 // references are never touched.
 //
 // Every document also carries a Content-Security-Policy <meta>: with remote
@@ -340,6 +341,7 @@ func prepareEmailHTML(raw string, allowRemote bool) (string, bool) {
 	var b strings.Builder
 	b.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8">`)
 	b.WriteString(`<meta http-equiv="Content-Security-Policy" content="` + csp + `">`)
+	b.WriteString(`<meta name="referrer" content="no-referrer">`)
 	b.WriteString(`<meta name="viewport" content="width=device-width, initial-scale=1">`)
 	b.WriteString(`<base target="_blank"><style>`)
 	b.WriteString(emailFrameCSS)

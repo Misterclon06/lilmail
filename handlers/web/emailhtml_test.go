@@ -262,3 +262,13 @@ func TestPrepareEmailHTML_StripsBodyMetaBase(t *testing.T) {
 		}
 	}
 }
+
+// The document must not leak the app URL as Referer to remote hosts.
+func TestPrepareEmailHTML_NoReferrer(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		out, _ := prepareEmailHTML(`<p>x</p>`, allow)
+		if !strings.Contains(out, `<meta name="referrer" content="no-referrer">`) {
+			t.Fatalf("allow=%v: missing no-referrer meta: %q", allow, out)
+		}
+	}
+}

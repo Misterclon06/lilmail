@@ -318,8 +318,9 @@
       and auto-size the frame to its natural content height) but deliberately
       NOT allow-scripts — with scripts disabled the email cannot run JS, so
       same-origin access is safe. Remote content is blocked server-side; the
-      "Display images" banner re-requests this message with ?images=1 so the
-      server renders it again without blocking.
+      "Display images" banner points the frame at /api/email/:id/body?images=1,
+      a real URL whose own CSP header lets images/styles load (srcdoc would
+      inherit the app CSP and block them).
     -->
     <div class="email-body"
          x-data="{
@@ -347,12 +348,12 @@
             },
             loadImages(btn) {
                 this.imagesLoaded = true;
-                const pane = btn.closest('#email-viewer-pane, #email-viewer-pane-mobile');
-                if (!pane) return;
-                const d = btn.dataset, headers = {'X-Folder': d.folder, 'Authorization': d.auth};
-                if (d.account) headers['X-Account-Email'] = d.account;
-                htmx.ajax('GET', '/api/email/' + encodeURIComponent(d.id) + '?images=1',
-                    {target: '#' + pane.id, swap: 'innerHTML', headers: headers});
+                const d = btn.dataset, f = $refs.frame;
+                let u = '/api/email/' + encodeURIComponent(d.id) + '/body?images=1&folder=' + encodeURIComponent(d.folder);
+                if (d.account) u += '&account=' + encodeURIComponent(d.account);
+                // A srcdoc frame inherits the app CSP (no remote images); load a real URL with its own CSP.
+                f.removeAttribute('srcdoc');
+                f.src = u;
             }
          }"
          @resize.window="size()">
@@ -365,7 +366,7 @@
             </svg>
             <span class="remote-img-banner__text">Images in this message are blocked to protect your privacy.</span>
             <button type="button" class="remote-img-banner__btn" @click="loadImages($el)"
-                    data-id="{{.Email.ID}}" data-folder="{{.CurrentFolder}}" data-auth="{{.AuthHeader}}"
+                    data-id="{{.Email.ID}}" data-folder="{{.CurrentFolder}}"
                     data-account="{{.Email.AccountEmail}}">Display images</button>
         </div>
 

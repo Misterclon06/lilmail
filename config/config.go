@@ -565,8 +565,11 @@ func (c *Config) GetSecurityHeaders() map[string]string {
 	//                     removing this would require a nonce/hash approach.
 	// blob:             — allows HTMX to use blob: object-URLs when needed.
 	//
-	// Email HTML bodies are sandboxed inside <iframe sandbox> (no allow-scripts)
-	// so they never reach this CSP; this policy is the outer-page defence.
+	// Email HTML bodies are sandboxed inside <iframe sandbox> (no allow-scripts).
+	// A srcdoc frame INHERITS this CSP, so blocked-remote bodies rendered via
+	// srcdoc can only load data: images; "Display images" therefore loads the
+	// body from /api/email/:id/body, whose own CSP header allows remote
+	// images/styles. This policy is the outer-page defence.
 	// Alpine.js evaluates expressions via new Function() which requires
 	// 'unsafe-eval'. Without it, Alpine silently falls back and x-data / x-show
 	// expressions may not initialize correctly. 'unsafe-inline' is also needed

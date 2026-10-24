@@ -369,3 +369,50 @@ func TestParse_BoundsValueLength(t *testing.T) {
 		}
 	}
 }
+
+// --- selectable free-text fields (search_mods) ------------------------------
+
+func TestNormalizeSearchMods(t *testing.T) {
+	cases := map[string][]string{
+		"":                     {"subject", "from"},
+		"bogus,;DROP":          {"subject", "from"},
+		"body":                 {"body"},
+		"BODY, Subject ,body":  {"subject", "body"},
+		"cc,to,from,subject,x": {"subject", "from", "to", "cc"},
+	}
+	for in, want := range cases {
+		got := NormalizeSearchMods(in)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("NormalizeSearchMods(%q) = %v; want %v", in, got, want)
+		}
+	}
+}
+
+func TestParseMods_FieldsAndWire(t *testing.T) {
+	// One field: merged straight into the criteria (no OR).
+	c, _ := parseSearchQueryMods(`alice`, []string{"subject"})
+	hdr(t, c, "SUBJECT", "alice")
+	if len(c.Or) != 0 || len(c.Body) != 0 {
+		t.Fatalf("single field should not OR or scan the body: %+v", c)
+	}
+
+	// Body only.
+	c, _ = parseSearchQueryMods(`alice`, []string{"body"})
+	if len(c.Body) != 1 || c.Body[0] != "alice" || len(c.Header) != 0 {
+		t.Fatalf("body-only -> %+v", c)
+	}
+
+	// Three fields: nested OR, serialised as OR a OR b c.
+	c, _ = parseSearchQueryMods(`alice`, []string{"subject", "from", "body"})
+	wire := encodeSearch(t, c)
+	if strings.Count(wire, "OR") != 2 || !strings.Contains(wire, "BODY") ||
+		!strings.Contains(wire, "SUBJECT") || !strings.Contains(wire, "FROM") {
+		t.Fatalf("3-field wire = %q", wire)
+	}
+
+	// Two words are ANDed, each across all selected fields; negation wraps the group.
+	c, _ = parseSearchQueryMods(`foo -bar`, []string{"subject", "to"})
+	if len(c.Or) != 1 || len(c.Not) != 1 || len(c.Not[0].Or) != 1 {
+		t.Fatalf("foo -bar -> Or=%d Not=%d", len(c.Or), len(c.Not))
+	}
+}

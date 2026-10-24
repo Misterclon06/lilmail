@@ -1,4 +1,7 @@
 <!-- partials/email-list.html — HTMX partial loaded into #email-list-inner -->
+<input type="hidden" name="folder" id="search-folder" value="{{.CurrentFolder}}" hx-swap-oob="true">
+<input type="hidden" name="unified" id="search-unified" value="{{if .Unified}}1{{else}}0{{end}}" hx-swap-oob="true">
+{{if .Total}}<div class="list-count">{{.Total}} messages</div>{{end}}
 {{if .Threads}}
     {{range .Threads}}
     {{$thread := .}}
@@ -171,7 +174,7 @@
 {{end}}
 
 {{if .HasMore}}
-    <div class="list-more" hx-get="{{if .SearchQuery}}/api/search?q={{.SearchQuery | urlquery}}&folder={{.CurrentFolder | urlquery}}&page={{.NextPage}}{{else}}/api/folder/{{.CurrentFolder | urlEncode}}/emails?page={{.NextPage}}{{end}}"
-         hx-trigger="revealed" hx-swap="outerHTML" hx-indicator="#list-spinner"></div>
+    <div class="list-more" hx-get="{{if .SearchQuery}}/api/search?q={{.SearchQuery | urlquery}}&folder={{.CurrentFolder | urlquery}}&mods={{.SearchMods | urlquery}}&page={{.NextPage}}{{if .Unified}}&unified=1{{end}}{{else}}/api/folder/{{.CurrentFolder | urlEncode}}/emails?page={{.NextPage}}{{if .Unified}}&unified=1{{end}}{{end}}"
+         hx-trigger="intersect once" hx-swap="outerHTML" hx-indicator="#list-spinner"></div>
 {{end}}
 

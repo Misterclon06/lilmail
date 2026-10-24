@@ -55,11 +55,45 @@
     </a>
 
     <!-- Search -->
-    <div class="topbar__search">
+    <script>
+    // searchMods — which fields free-text search matches, remembered per folder in
+    // this browser (localStorage; nothing is stored on the server).
+    function searchMods() {
+        const ALL = ['subject', 'from', 'to', 'cc', 'body'], DEF = ['subject', 'from'];
+        const key = f => 'lm.searchmods.' + f;
+        const load = f => {
+            try {
+                const v = JSON.parse(localStorage.getItem(key(f)));
+                if (Array.isArray(v)) { const ok = ALL.filter(m => v.includes(m)); if (ok.length) return ok; }
+            } catch (e) {}
+            return DEF.slice();
+        };
+        return {
+            open: false,
+            mods: DEF.slice(),
+            folder() { const el = document.getElementById('search-folder'); return (el && el.value) || 'INBOX'; },
+            init() {
+                this.mods = load(this.folder());
+                // The list partial updates #search-folder out-of-band when the folder changes.
+                document.body.addEventListener('htmx:afterSettle', () => { this.mods = load(this.folder()); });
+            },
+            toggle(m) {
+                const on = this.mods.includes(m);
+                if (on && this.mods.length === 1) return; // keep at least one field
+                this.mods = ALL.filter(x => (x === m ? !on : this.mods.includes(x)));
+                try { localStorage.setItem(key(this.folder()), JSON.stringify(this.mods)); } catch (e) {}
+                const q = document.getElementById('search-input');
+                if (q && q.value.trim()) this.$nextTick(() => htmx.trigger(q, 'search'));
+            }
+        };
+    }
+    </script>
+    <div class="topbar__search" x-data="searchMods()" @keydown.escape="open = false">
         <svg class="topbar__search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/>
         </svg>
-        <input type="search" placeholder="Search subject / sender (body:word for full text)"
+        <input type="search" placeholder="Search mail"
+               id="search-input"
                class="topbar__search-input"
                aria-label="Search mail"
                name="q"
@@ -68,7 +102,22 @@
                hx-sync="this:replace"
                hx-target="#email-list-inner"
                hx-swap="innerHTML"
-               hx-include="[name='q']">
+               hx-include="[name='mods'], [name='folder'], [name='unified']">
+        <input type="hidden" name="folder" id="search-folder" value="{{if .CurrentFolder}}{{.CurrentFolder}}{{else}}INBOX{{end}}">
+        <input type="hidden" name="unified" id="search-unified" value="{{if .Unified}}1{{else}}0{{end}}">
+        <input type="hidden" name="mods" :value="mods.join(',')" value="subject,from">
+        <button type="button" class="topbar__search-mods" @click="open = !open"
+                :aria-expanded="open" aria-label="Search in…" title="Search in…">&#9662;</button>
+        <div class="search-mods" x-show="open" x-cloak @click.outside="open = false">
+            <div class="search-mods__title">Search in</div>
+            <template x-for="m in ['subject','from','to','cc','body']" :key="m">
+                <label class="search-mods__opt">
+                    <input type="checkbox" :checked="mods.includes(m)" @change="toggle(m)">
+                    <span x-text="m.charAt(0).toUpperCase() + m.slice(1)"></span>
+                </label>
+            </template>
+            <div class="search-mods__hint">Body scans every message and can be slow.</div>
+        </div>
     </div>
 
     <!-- Account -->

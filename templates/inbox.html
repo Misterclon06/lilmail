@@ -323,6 +323,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <!-- Define the email-rows sub-template so email-list.html can reuse it -->
 {{define "email-rows"}}
+{{if .Total}}<div class="list-count">{{.Total}} messages</div>{{end}}
 {{if .Threads}}
     {{range .Threads}}
     {{$thread := .}}
@@ -488,7 +489,7 @@ document.addEventListener('DOMContentLoaded', function() {
 {{end}}
 
 {{if .HasMore}}
-    <div class="list-more" hx-get="/api/folder/{{.CurrentFolder | urlEncode}}/emails?page={{.NextPage}}"
-         hx-trigger="revealed" hx-swap="outerHTML" hx-indicator="#list-spinner"></div>
+    <div class="list-more" hx-get="/api/folder/{{.CurrentFolder | urlEncode}}/emails?page={{.NextPage}}{{if .Unified}}&unified=1{{end}}"
+         hx-trigger="intersect once" hx-swap="outerHTML" hx-indicator="#list-spinner"></div>
 {{end}}
 {{end}}

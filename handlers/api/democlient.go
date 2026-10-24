@@ -319,6 +319,14 @@ func (d *DemoClient) FetchSingleMessage(folderName, uid string) (models.Email, e
 // SearchMessages filters seed inbox messages whose Subject, From, or Body
 // contains the query string (case-insensitive).
 func (d *DemoClient) SearchMessages(folderName, query string, limit uint32) ([]models.Email, error) {
+	emails, _, err := d.SearchMessagesPaged(folderName, query, nil, limit, 0)
+	return emails, err
+}
+
+// SearchMessagesPaged is SearchMessages with paging (newest first, skipping the
+// first `offset` matches). mods is ignored: demo search always matches
+// Subject, From, Body and Preview.
+func (d *DemoClient) SearchMessagesPaged(folderName, query string, _ []string, limit, offset uint32) ([]models.Email, bool, error) {
 	q := strings.ToLower(query)
 	var results []models.Email
 	for _, m := range d.folderMessages(folderName) {
@@ -327,12 +335,16 @@ func (d *DemoClient) SearchMessages(folderName, query string, limit uint32) ([]m
 			strings.Contains(strings.ToLower(m.Body), q) ||
 			strings.Contains(strings.ToLower(m.Preview), q) {
 			results = append(results, m)
-			if limit > 0 && uint32(len(results)) >= limit {
-				break
-			}
 		}
 	}
-	return results, nil
+	if offset >= uint32(len(results)) {
+		return []models.Email{}, false, nil
+	}
+	results = results[offset:]
+	if limit > 0 && uint32(len(results)) > limit {
+		return results[:limit], true, nil
+	}
+	return results, false, nil
 }
 
 // FetchAttachment returns a minimal placeholder for the requested attachment.

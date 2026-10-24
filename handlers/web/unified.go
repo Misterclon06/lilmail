@@ -43,6 +43,32 @@ type AccountFetchResult struct {
 	Emails []models.Email
 	// Err is non-nil when the fetch for this account failed.
 	Err error
+	// More reports that the account may hold older messages than it returned.
+	More bool
+}
+
+// listFetcher loads up to limit newest messages from one account's client and
+// reports whether older ones remain. Unified listing and unified search differ
+// only in this function.
+type listFetcher func(c api.MailClient, limit uint32) ([]models.Email, bool, error)
+
+// folderFetcher lists a folder (more = the account returned a full window).
+func folderFetcher(folder string) listFetcher {
+	return func(c api.MailClient, limit uint32) ([]models.Email, bool, error) {
+		emails, err := c.FetchMessages(folder, limit)
+		return emails, err == nil && uint32(len(emails)) >= limit, err
+	}
+}
+
+// searchFetcher searches a folder, paging when the client supports it.
+func searchFetcher(folder, query string, mods []string) listFetcher {
+	return func(c api.MailClient, limit uint32) ([]models.Email, bool, error) {
+		if sp, ok := c.(searchPager); ok {
+			return sp.SearchMessagesPaged(folder, query, mods, limit, 0)
+		}
+		emails, err := c.SearchMessages(folder, query, limit)
+		return emails, err == nil && uint32(len(emails)) >= limit, err
+	}
 }
 
 // AccountFetchError aggregates per-account errors returned alongside a
@@ -74,9 +100,9 @@ func (e AccountFetchError) HasErrors() bool {
 
 // unifiedFetcher carries the dependencies needed by FetchUnified.
 type unifiedFetcher struct {
-	auth   *AuthHandler
-	folder string
-	limit  uint32
+	auth  *AuthHandler
+	fn    listFetcher
+	limit uint32
 }
 
 // fetchForEntry fetches messages for one additional (non-session) account.
@@ -96,6 +122,7 @@ func (f *unifiedFetcher) fetchForEntry(entry AccountEntry) AccountFetchResult {
 
 	done := make(chan struct{})
 	var emails []models.Email
+	var more bool
 	var err error
 
 	go func() {
@@ -107,7 +134,7 @@ func (f *unifiedFetcher) fetchForEntry(entry AccountEntry) AccountFetchResult {
 		}
 		defer client.Close()
 
-		emails, err = client.FetchMessages(f.folder, f.limit)
+		emails, more, err = f.fn(client, f.limit)
 	}()
 
 	select {
@@ -129,6 +156,7 @@ func (f *unifiedFetcher) fetchForEntry(entry AccountEntry) AccountFetchResult {
 		emails[i].AccountColor = entry.Color
 	}
 	result.Emails = emails
+	result.More = more
 	return result
 }
 
@@ -151,21 +179,99 @@ func FetchUnified(
 	folder string,
 	limit uint32,
 ) ([]models.Email, []AccountFetchResult) {
+	merged, _, allResults := fetchUnifiedMerged(primaryClient, primaryEmail, primaryLabel, primaryColor,
+		entries, auth, limit, folderFetcher(folder))
+
+	// Cap at limit × account count to avoid unbounded growth; cap at 200.
+	maxMerged := int(limit) * (len(allResults))
+	if maxMerged > 200 {
+		maxMerged = 200
+	}
+	if len(merged) > maxMerged {
+		merged = merged[:maxMerged]
+	}
+	return merged, allResults
+}
+
+// maxUnifiedPage bounds unified paging: page N asks every account for N pages'
+// worth of messages (see unifiedPage), so the cost grows with N.
+const maxUnifiedPage = 20
+
+// unifiedPage returns the date-descending window for a 1-based page of a merged
+// unified list and whether further pages exist.
+func unifiedPage(merged []models.Email, anyMore bool, page int) ([]models.Email, bool) {
+	start := (page - 1) * mailPageSize
+	end := start + mailPageSize
+	if start >= len(merged) {
+		return nil, false
+	}
+	if end > len(merged) {
+		end = len(merged)
+	}
+	return merged[start:end], end < len(merged) || (anyMore && page < maxUnifiedPage)
+}
+
+// FetchUnifiedPage lists one page of the unified folder view. Accounts have
+// independent UID spaces, so there is no cross-account cursor: each account is
+// asked for page*mailPageSize messages and the merged, date-sorted list is
+// windowed. Simple and correct; the cost grows with the page number.
+func FetchUnifiedPage(
+	primaryClient api.MailClient,
+	primaryEmail, primaryLabel, primaryColor string,
+	entries []AccountEntry,
+	auth *AuthHandler,
+	folder string,
+	page int,
+) ([]models.Email, bool, []AccountFetchResult) {
+	merged, more, results := fetchUnifiedMerged(primaryClient, primaryEmail, primaryLabel, primaryColor,
+		entries, auth, uint32(page*mailPageSize), folderFetcher(folder))
+	window, hasMore := unifiedPage(merged, more, page)
+	return window, hasMore, results
+}
+
+// SearchUnifiedPage is FetchUnifiedPage for a search across all accounts.
+func SearchUnifiedPage(
+	primaryClient api.MailClient,
+	primaryEmail, primaryLabel, primaryColor string,
+	entries []AccountEntry,
+	auth *AuthHandler,
+	folder, query string,
+	mods []string,
+	page int,
+) ([]models.Email, bool, []AccountFetchResult) {
+	merged, more, results := fetchUnifiedMerged(primaryClient, primaryEmail, primaryLabel, primaryColor,
+		entries, auth, uint32(page*mailPageSize), searchFetcher(folder, query, mods))
+	window, hasMore := unifiedPage(merged, more, page)
+	return window, hasMore, results
+}
+
+// fetchUnifiedMerged runs fn against the primary client and every additional
+// account concurrently and returns the merged, date-sorted, UNCAPPED messages,
+// whether any account may have more, and the per-account results.
+func fetchUnifiedMerged(
+	primaryClient api.MailClient,
+	primaryEmail, primaryLabel, primaryColor string,
+	entries []AccountEntry,
+	auth *AuthHandler,
+	limit uint32,
+	fn listFetcher,
+) ([]models.Email, bool, []AccountFetchResult) {
 
 	type primaryResult struct {
 		emails []models.Email
+		more   bool
 		err    error
 	}
 
 	// Fetch primary account — already connected.
 	primCh := make(chan primaryResult, 1)
 	go func() {
-		emails, err := primaryClient.FetchMessages(folder, limit)
-		primCh <- primaryResult{emails, err}
+		emails, more, err := fn(primaryClient, limit)
+		primCh <- primaryResult{emails, more, err}
 	}()
 
 	// Fetch additional accounts concurrently.
-	fetcher := &unifiedFetcher{auth: auth, folder: folder, limit: limit}
+	fetcher := &unifiedFetcher{auth: auth, fn: fn, limit: limit}
 	results := make([]AccountFetchResult, len(entries))
 	var wg sync.WaitGroup
 	for i, entry := range entries {
@@ -187,6 +293,7 @@ func FetchUnified(
 		AccountColor: primaryColor,
 		Emails:       prim.emails,
 		Err:          prim.err,
+		More:         prim.more,
 	}
 	if primaryFetchResult.AccountLabel == "" {
 		primaryFetchResult.AccountLabel = primaryEmail
@@ -219,14 +326,11 @@ func FetchUnified(
 		return merged[i].Date.After(merged[j].Date)
 	})
 
-	// Cap at limit × account count to avoid unbounded growth; cap at 200.
-	maxMerged := int(limit) * (len(allResults))
-	if maxMerged > 200 {
-		maxMerged = 200
+	anyMore := false
+	for _, r := range allResults {
+		if r.Err == nil && r.More {
+			anyMore = true
+		}
 	}
-	if len(merged) > maxMerged {
-		merged = merged[:maxMerged]
-	}
-
-	return merged, allResults
+	return merged, anyMore, allResults
 }

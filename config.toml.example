@@ -29,6 +29,17 @@ server = "mail.example.com"
 port = 993
 tls = true
 
+# Performance notes (lilmail opens one IMAP connection per request, so every
+# click pays TCP + TLS + LOGIN; set LILMAIL_TIMING=1 to log where the time goes):
+#   - IMAP server on the SAME machine: use server = "127.0.0.1", port = 143,
+#     tls = false. Loopback needs no encryption and skips the TLS handshake.
+#     Never do this for a remote server: the password would travel in clear text.
+#   - Dovecot: LOGIN verifies a password hash on every connection. Enabling its
+#     auth cache (e.g. auth_cache_size = 10M, auth_cache_ttl = 1 hour) avoids
+#     re-hashing on every request.
+#   - Every connect has a 10 s dial/greeting timeout and each command a 60 s
+#     timeout, so an unresponsive server returns an error instead of hanging.
+
 # Cache / working directory. Used for the embedded bbolt store AND for staging
 # OUTBOUND attachment uploads (POST /v1/attachments) before a message is sent.
 # Defaults to "./cache" when omitted; set it to a writable, persistent path.

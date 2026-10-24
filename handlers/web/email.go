@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/session"
@@ -94,6 +95,59 @@ func (h *EmailHandler) buildThreads(username, folder string, emails []models.Ema
 	return api.ThreadMessages(emails)
 }
 
+// folderPage is one rendered page of a folder list.
+type folderPage struct {
+	Emails        []models.Email
+	Threads       []models.Thread
+	HasMore       bool
+	Total         uint32 // folder size, 0 when unknown or not the first page
+	AccountErrors []AccountFetchResult
+}
+
+// loadFolderPage fetches one page of folder and threads it. unified merges all
+// accounts (INBOX only; the caller decides).
+//
+// Threads are built from the page alone (api.ThreadMessages), never from the
+// bbolt header cache: that cache unions every message ever seen in the folder,
+// which made each page repeat the threads of earlier pages and, during a first
+// scroll, hid replies that threaded into a row rendered before they were
+// fetched. Page-local threading is deterministic: every message is listed
+// exactly once; a conversation that straddles a page boundary appears as two
+// rows (one per page).
+func (h *EmailHandler) loadFolderPage(client api.MailClient, userStr, sessionEmail, folder string,
+	page int, unified bool, accounts []AccountEntry) (folderPage, error) {
+	var p folderPage
+	if unified {
+		if page > maxUnifiedPage {
+			page = maxUnifiedPage
+		}
+		p.Emails, p.HasMore, p.AccountErrors = FetchUnifiedPage(
+			client,
+			sessionEmail, "", "", // primary has no badge in unified when label is ""
+			accounts, h.auth, folder, page)
+		p.Threads = api.ThreadMessages(p.Emails)
+		return p, nil
+	}
+	var err error
+	var total uint32
+	p.Emails, p.HasMore, total, err = fetchPageTotal(client, folder, page)
+	if err != nil {
+		return p, err
+	}
+	p.Total = listTotal(page, total)
+	p.Threads = api.ThreadMessages(p.Emails)
+	return p, nil
+}
+
+// listTotal returns the "N messages" header value: shown on the first page only,
+// since later pages are appended to the same list.
+func listTotal(page int, total uint32) uint32 {
+	if page == 1 {
+		return total
+	}
+	return 0
+}
+
 // mailPageSize is the number of messages per list page.
 const mailPageSize = 50
 
@@ -115,20 +169,43 @@ func pageParam(c *fiber.Ctx) int {
 // searchPager is implemented by clients that can page search results
 // (*api.Client). Others (demo mode) fall back to a single capped page.
 type searchPager interface {
-	SearchMessagesPaged(folder, query string, limit, offset uint32) ([]models.Email, bool, error)
+	SearchMessagesPaged(folder, query string, mods []string, limit, offset uint32) ([]models.Email, bool, error)
 }
 
 // fetchPage returns one newest-first page of folder and whether older messages
 // exist. It asks for one extra message to detect a next page without a second
 // round trip, then drops that extra (the oldest, i.e. lowest UID).
 func fetchPage(client api.MailClient, folder string, page int) ([]models.Email, bool, error) {
+	emails, hasMore, _, err := fetchPageTotal(client, folder, page)
+	return emails, hasMore, err
+}
+
+// pagedTotaler is implemented by clients that report the folder's message
+// count together with a page (*api.Client). Others report total 0 (unknown).
+type pagedTotaler interface {
+	FetchMessagesPagedTotal(folder string, limit, offset uint32) ([]models.Email, uint32, error)
+}
+
+// fetchPageTotal is fetchPage that also returns the folder's total message
+// count (0 when the client cannot report it).
+func fetchPageTotal(client api.MailClient, folder string, page int) ([]models.Email, bool, uint32, error) {
+	defer api.LogTiming("list fetch "+folder, time.Now())
 	offset := uint32((page - 1) * mailPageSize)
-	emails, err := client.FetchMessagesPaged(folder, mailPageSize+1, offset)
+	var (
+		emails []models.Email
+		total  uint32
+		err    error
+	)
+	if pt, ok := client.(pagedTotaler); ok {
+		emails, total, err = pt.FetchMessagesPagedTotal(folder, mailPageSize+1, offset)
+	} else {
+		emails, err = client.FetchMessagesPaged(folder, mailPageSize+1, offset)
+	}
 	if err != nil {
-		return nil, false, err
+		return nil, false, 0, err
 	}
 	if len(emails) <= mailPageSize {
-		return emails, false, nil
+		return emails, false, total, nil
 	}
 	oldest := len(emails) - 1
 	minID, perr := strconv.ParseUint(emails[oldest].ID, 10, 32)
@@ -141,7 +218,7 @@ func fetchPage(client api.MailClient, folder string, page int) ([]models.Email, 
 			minID, oldest = id, i
 		}
 	}
-	return append(emails[:oldest:oldest], emails[oldest+1:]...), true, nil
+	return append(emails[:oldest:oldest], emails[oldest+1:]...), true, total, nil
 }
 
 // HandleInbox renders the main inbox page.
@@ -190,49 +267,26 @@ func (h *EmailHandler) HandleInbox(c *fiber.Ctx) error {
 	}
 	defer client.Close()
 
-	var emails []models.Email
-	var accountErrors []AccountFetchResult
-	var hasMore bool
-
-	if unified && unifiedAvailable {
-		// Fan out to all accounts.
-		emails, accountErrors = FetchUnified(
-			client,
-			sessionEmail, "", "", // primary has no badge in unified when label is ""
-			additionalAccounts,
-			h.auth,
-			"INBOX",
-			50,
-		)
-	} else {
-		// Single-account path — unchanged behaviour.
-		emails, hasMore, err = fetchPage(client, "INBOX", 1)
-		if err != nil {
-			return c.Status(500).SendString("Error fetching emails")
-		}
+	pg, err := h.loadFolderPage(client, userStr, sessionEmail, "INBOX", 1,
+		unified && unifiedAvailable, additionalAccounts)
+	if err != nil {
+		return c.Status(500).SendString("Error fetching emails")
 	}
-
-	// Build JWZ threads.  In unified mode we bucket by account+folder to avoid
-	// UID collisions between different servers.
-	threadKey := "INBOX"
-	if unified && unifiedAvailable {
-		threadKey = "UNIFIED/INBOX"
-	}
-	threads := h.buildThreads(userStr, threadKey, emails)
 
 	return c.Render("inbox", fiber.Map{
 		"Username":         userStr,
 		"Email":            sessionEmail,
 		"Folders":          folders,
-		"Emails":           emails,
-		"Threads":          threads,
+		"Emails":           pg.Emails,
+		"Threads":          pg.Threads,
 		"CurrentFolder":    "INBOX",
 		"Token":            token,
 		"Unified":          unified && unifiedAvailable,
 		"UnifiedAvailable": unifiedAvailable,
-		"AccountErrors":    accountErrors,
-		"HasMore":          hasMore,
+		"AccountErrors":    pg.AccountErrors,
+		"HasMore":          pg.HasMore,
 		"NextPage":         2,
+		"Total":            pg.Total,
 	})
 }
 
@@ -268,7 +322,7 @@ func (h *EmailHandler) HandleFolder(c *fiber.Ctx) error {
 	defer client.Close()
 
 	// Fetch folder emails
-	emails, hasMore, err := fetchPage(client, folderName, 1)
+	emails, hasMore, total, err := fetchPageTotal(client, folderName, 1)
 	if err != nil {
 		return c.Status(500).SendString("Error fetching emails")
 	}
@@ -280,7 +334,7 @@ func (h *EmailHandler) HandleFolder(c *fiber.Ctx) error {
 	}
 
 	// Build JWZ threads using the shared bbolt store.
-	threads := h.buildThreads(userStr, folderName, emails)
+	threads := api.ThreadMessages(emails)
 
 	return c.Render("inbox", fiber.Map{
 		"Username":      userStr,
@@ -291,7 +345,75 @@ func (h *EmailHandler) HandleFolder(c *fiber.Ctx) error {
 		"Token":         token,
 		"HasMore":       hasMore,
 		"NextPage":      2,
+		"Total":         total,
 	})
+}
+
+// clientForAccount opens an IMAP client for accountEmail: the session account
+// when empty or equal to the session email, otherwise one of the user's stored
+// additional accounts (unified mode). Callers must Close the client.
+func (h *EmailHandler) clientForAccount(c *fiber.Ctx, accountEmail string) (api.MailClient, error) {
+	if accountEmail != "" && h.acctStore != nil && h.config.Accounts.Enabled {
+		username, _ := c.Locals("username").(string)
+		sessionEmail, _ := c.Locals("email").(string)
+		if accountEmail == sessionEmail {
+			return h.auth.CreateIMAPClient(c) // primary account — session client
+		}
+		entries, err := h.acctStore.List(username)
+		if err == nil {
+			for _, e := range entries {
+				if e.Email == accountEmail {
+					return h.auth.CreateIMAPClientForAccount(e)
+				}
+			}
+		}
+		return nil, fmt.Errorf("account %s not found", accountEmail)
+	}
+	return h.auth.CreateIMAPClient(c)
+}
+
+// HandleEmailBody serves a message's HTML body as its own document for the
+// reading-pane iframe. It exists for "Display images": a srcdoc iframe inherits
+// the app's strict CSP (img-src 'self' data: blob:), so remote images and
+// stylesheets could never load there. This route returns the body with its OWN
+// Content-Security-Policy header (images/styles/fonts only, no scripts, frames
+// or forms) and Referrer-Policy: no-referrer so the app URL is not leaked to
+// the remote hosts. Session-gated like the rest of /api; the account lookup is
+// the same as HandleEmailView, so a user can only read their own mailboxes.
+// Route: GET /api/email/:id/body?folder=<folder>[&account=<email>][&images=1]
+func (h *EmailHandler) HandleEmailBody(c *fiber.Ctx) error {
+	emailID := c.Params("id")
+	if emailID == "" {
+		return c.Status(400).SendString("Email ID required")
+	}
+	folderName := c.Query("folder")
+	if folderName == "" {
+		folderName = "INBOX"
+	}
+
+	client, err := h.clientForAccount(c, c.Query("account"))
+	if err != nil {
+		return c.Status(500).SendString("Error connecting to email server")
+	}
+	defer client.Close()
+
+	email, err := client.FetchSingleMessage(folderName, emailID)
+	if err != nil {
+		log.Printf("HandleEmailBody: fetch %s/%s: %v", folderName, emailID, err)
+		return c.Status(500).SendString("Error fetching email")
+	}
+
+	allow := c.Query("images") == "1"
+	doc, _ := prepareEmailHTML(email.HTML, allow)
+	csp := cspBlocked
+	if allow {
+		csp = cspAllowed
+	}
+	c.Set("Content-Security-Policy", csp+"; frame-ancestors 'self'")
+	c.Set("Referrer-Policy", "no-referrer")
+	c.Set("Cache-Control", "private, no-store")
+	c.Type("html", "utf-8")
+	return c.SendString(doc)
 }
 
 // HandleEmailView handles the HTMX request for viewing a single email.
@@ -321,36 +443,7 @@ func (h *EmailHandler) HandleEmailView(c *fiber.Ctx) error {
 	// Unified mode: X-Account-Email tells us which account this message belongs to.
 	accountEmail := c.Get("X-Account-Email")
 
-	var client api.MailClient
-	var err error
-
-	if accountEmail != "" && h.acctStore != nil && h.config.Accounts.Enabled {
-		// Try to find this account in the store.
-		username, _ := c.Locals("username").(string)
-		sessionEmail, _ := c.Locals("email").(string)
-
-		if accountEmail == sessionEmail {
-			// It's the primary account — use the session client.
-			client, err = h.auth.CreateIMAPClient(c)
-		} else {
-			// It's an additional account.
-			entries, listErr := h.acctStore.List(username)
-			if listErr == nil {
-				for _, e := range entries {
-					if e.Email == accountEmail {
-						client, err = h.auth.CreateIMAPClientForAccount(e)
-						break
-					}
-				}
-			}
-			if client == nil && err == nil {
-				err = fmt.Errorf("account %s not found", accountEmail)
-			}
-		}
-	} else {
-		client, err = h.auth.CreateIMAPClient(c)
-	}
-
+	client, err := h.clientForAccount(c, accountEmail)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{
 			"error": "Error connecting to email server",
@@ -359,7 +452,9 @@ func (h *EmailHandler) HandleEmailView(c *fiber.Ctx) error {
 	defer client.Close()
 
 	// Fetch the email
+	fetchStart := time.Now()
 	email, err := client.FetchSingleMessage(folderName, emailID)
+	api.LogTiming("message fetch "+folderName, fetchStart)
 	if err != nil {
 		log.Printf("Error fetching email %s from folder %s: %v", emailID, folderName, err)
 		return c.Status(500).JSON(fiber.Map{
@@ -406,7 +501,6 @@ func (h *EmailHandler) HandleEmailView(c *fiber.Ctx) error {
 		"EmailHTML":     preparedHTML,
 		"EditableHTML":  editableHTML,
 		"HasRemote":     hasRemote,
-		"AuthHeader":    token,
 		"Self":          self,
 		"CurrentFolder": folderName,
 		"IsDrafts":      isDrafts,
@@ -542,7 +636,13 @@ func (h *EmailHandler) HandleFolderEmails(c *fiber.Ctx) error {
 			"error": "Invalid folder name",
 		})
 	}
+	return h.renderFolderList(c, folderName)
+}
 
+// renderFolderList renders one page (?page=N) of folderName as the email-list
+// partial. Shared by HandleFolderEmails and by HandleSearch for an empty query
+// (clearing the search box restores the normal list).
+func (h *EmailHandler) renderFolderList(c *fiber.Ctx, folderName string) error {
 	username := c.Locals("username")
 	if username == nil {
 		return c.Status(401).JSON(fiber.Map{
@@ -576,49 +676,30 @@ func (h *EmailHandler) HandleFolderEmails(c *fiber.Ctx) error {
 	}
 	defer client.Close()
 
-	var emails []models.Email
-	var accountErrors []AccountFetchResult
-	var hasMore bool
 	page := pageParam(c)
-
-	if unified && unifiedAvailable && folderName == "INBOX" {
-		emails, accountErrors = FetchUnified(
-			client,
-			sessionEmail, "", "",
-			additionalAccounts,
-			h.auth,
-			folderName,
-			50,
-		)
-	} else {
-		emails, hasMore, err = fetchPage(client, folderName, page)
-		if err != nil {
-			return c.Status(500).JSON(fiber.Map{
-				"error": fmt.Sprintf("Error fetching emails: %v", err),
-			})
-		}
-		// Past the end (e.g. mailbox shrank): return nothing, not the empty state.
-		if page > 1 && len(emails) == 0 {
-			return c.SendString("")
-		}
+	useUnified := unified && unifiedAvailable && folderName == "INBOX"
+	pg, err := h.loadFolderPage(client, userStr, sessionEmail, folderName, page, useUnified, additionalAccounts)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"error": fmt.Sprintf("Error fetching emails: %v", err),
+		})
 	}
-
-	threadKey := folderName
-	if unified && unifiedAvailable && folderName == "INBOX" {
-		threadKey = "UNIFIED/INBOX"
+	// Past the end (e.g. mailbox shrank): return nothing, not the empty state.
+	if page > 1 && len(pg.Emails) == 0 {
+		return c.SendString("")
 	}
-	threads := h.buildThreads(userStr, threadKey, emails)
 
 	return c.Render("partials/email-list", fiber.Map{
-		"Emails":           emails,
-		"Threads":          threads,
+		"Emails":           pg.Emails,
+		"Threads":          pg.Threads,
 		"CurrentFolder":    folderName,
 		"Token":            token,
-		"Unified":          unified && unifiedAvailable,
+		"Unified":          useUnified,
 		"UnifiedAvailable": unifiedAvailable,
-		"AccountErrors":    accountErrors,
-		"HasMore":          hasMore,
+		"AccountErrors":    pg.AccountErrors,
+		"HasMore":          pg.HasMore,
 		"NextPage":         page + 1,
+		"Total":            pg.Total,
 	}, "") // Explicitly set no layout
 }
 
@@ -1046,17 +1127,16 @@ func (h *EmailHandler) HandleMarkUnread(c *fiber.Ctx) error {
 }
 
 // HandleSearch performs an IMAP SEARCH and returns matching messages as an
-// email-list partial.
-// Route: GET /api/search?q=<query>&folder=<folder>
+// email-list partial. An empty query returns the normal folder list.
+// Route: GET /api/search?q=<query>&folder=<folder>[&mods=subject,from][&unified=1][&page=N]
 func (h *EmailHandler) HandleSearch(c *fiber.Ctx) error {
-	query := strings.TrimSpace(c.Query("q"))
-	if query == "" {
-		return c.Status(400).JSON(fiber.Map{"error": "q parameter required"})
-	}
-
 	folderName := c.Query("folder")
 	if folderName == "" {
 		folderName = "INBOX"
+	}
+	query := strings.TrimSpace(c.Query("q"))
+	if query == "" {
+		return h.renderFolderList(c, folderName)
 	}
 
 	username := c.Locals("username")
@@ -1064,11 +1144,19 @@ func (h *EmailHandler) HandleSearch(c *fiber.Ctx) error {
 	if u, ok := username.(string); ok {
 		userStr = u
 	}
+	sessionEmail, _ := c.Locals("email").(string)
 
 	token, err := api.GetSessionToken(c, h.store)
 	if err != nil {
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid session"})
 	}
+
+	var additionalAccounts []AccountEntry
+	if h.acctStore != nil && h.config.Accounts.Enabled {
+		additionalAccounts, _ = h.acctStore.List(userStr)
+	}
+	unifiedAvailable := len(additionalAccounts) > 0
+	useUnified := c.Query("unified") == "1" && unifiedAvailable && folderName == "INBOX"
 
 	client, err := h.auth.CreateIMAPClient(c)
 	if err != nil {
@@ -1077,31 +1165,49 @@ func (h *EmailHandler) HandleSearch(c *fiber.Ctx) error {
 	defer client.Close()
 
 	page := pageParam(c)
-	var emails []models.Email
-	var hasMore bool
-	if sp, ok := client.(searchPager); ok {
-		emails, hasMore, err = sp.SearchMessagesPaged(folderName, query, mailPageSize, uint32((page-1)*mailPageSize))
+	mods := api.NormalizeSearchMods(c.Query("mods"))
+	var (
+		emails        []models.Email
+		threads       []models.Thread
+		hasMore       bool
+		accountErrors []AccountFetchResult
+	)
+	defer api.LogTiming("search "+folderName, time.Now())
+	if useUnified {
+		if page > maxUnifiedPage {
+			page = maxUnifiedPage
+		}
+		emails, hasMore, accountErrors = SearchUnifiedPage(client, sessionEmail, "", "",
+			additionalAccounts, h.auth, folderName, query, mods, page)
+		threads = api.ThreadMessages(emails)
 	} else {
-		emails, err = client.SearchMessages(folderName, query, mailPageSize)
-	}
-	if err != nil {
-		log.Printf("HandleSearch: %v", err)
-		return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("Search failed: %v", err)})
+		if sp, ok := client.(searchPager); ok {
+			emails, hasMore, err = sp.SearchMessagesPaged(folderName, query, mods, mailPageSize, uint32((page-1)*mailPageSize))
+		} else {
+			emails, err = client.SearchMessages(folderName, query, mailPageSize)
+		}
+		if err != nil {
+			log.Printf("HandleSearch: %v", err)
+			return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("Search failed: %v", err)})
+		}
+		threads = api.ThreadMessages(emails)
 	}
 	// Past the end: return nothing rather than the "No results" empty state.
 	if page > 1 && len(emails) == 0 {
 		return c.SendString("")
 	}
 
-	threads := h.buildThreads(userStr, folderName+":search:"+query, emails)
-
 	return c.Render("partials/email-list", fiber.Map{
-		"Emails":        emails,
-		"Threads":       threads,
-		"CurrentFolder": folderName,
-		"Token":         token,
-		"SearchQuery":   query,
-		"HasMore":       hasMore,
-		"NextPage":      page + 1,
+		"Emails":           emails,
+		"Threads":          threads,
+		"CurrentFolder":    folderName,
+		"Token":            token,
+		"SearchQuery":      query,
+		"SearchMods":       strings.Join(mods, ","),
+		"Unified":          useUnified,
+		"UnifiedAvailable": unifiedAvailable,
+		"AccountErrors":    accountErrors,
+		"HasMore":          hasMore,
+		"NextPage":         page + 1,
 	}, "")
 }

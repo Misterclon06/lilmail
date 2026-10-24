@@ -54,13 +54,22 @@ func (c *Client) FetchMessages(folderName string, limit uint32) ([]models.Email,
 // page. offset=0 returns the newest `limit` (identical to FetchMessages); larger
 // offsets scroll further back, letting a client page a large mailbox.
 func (c *Client) FetchMessagesPaged(folderName string, limit, offset uint32) ([]models.Email, error) {
+	emails, _, err := c.FetchMessagesPagedTotal(folderName, limit, offset)
+	return emails, err
+}
+
+// FetchMessagesPagedTotal is FetchMessagesPaged that also returns the total
+// number of messages in the folder (from the SELECT response, so it costs no
+// extra round trip) for "N messages" headers.
+func (c *Client) FetchMessagesPagedTotal(folderName string, limit, offset uint32) ([]models.Email, uint32, error) {
 	mbox, err := c.client.Select(folderName, false)
 	if err != nil {
-		return nil, fmt.Errorf("error selecting folder %s: %v", folderName, err)
+		return nil, 0, fmt.Errorf("error selecting folder %s: %v", folderName, err)
 	}
+	total := mbox.Messages
 
 	if mbox.Messages == 0 || offset >= mbox.Messages {
-		return []models.Email{}, nil
+		return []models.Email{}, total, nil
 	}
 
 	end := mbox.Messages - offset
@@ -98,10 +107,10 @@ func (c *Client) FetchMessagesPaged(folderName string, limit, offset uint32) ([]
 	}
 
 	if err := <-done; err != nil {
-		return emails, fmt.Errorf("error during fetch: %v", err)
+		return emails, total, fmt.Errorf("error during fetch: %v", err)
 	}
 
-	return emails, nil
+	return emails, total, nil
 }
 
 // processListMessage builds an Email from a list-fetch message. It only
@@ -152,13 +161,8 @@ func (c *Client) processListMessage(msg *imap.Message, folderName string) (model
 	// Build preview from the partial TEXT section if available.
 	if r := msg.GetBody(previewSection); r != nil {
 		if raw, err := io.ReadAll(r); err == nil && len(raw) > 0 {
-			text := string(raw)
-			// Strip any residual MIME headers that appear before the actual body.
-			if idx := strings.Index(text, "\r\n\r\n"); idx >= 0 {
-				text = text[idx+4:]
-			} else if idx := strings.Index(text, "\n\n"); idx >= 0 {
-				text = text[idx+2:]
-			}
+			// Drop MIME boundary lines / part headers; a single-part body is untouched.
+			text := previewBody(string(raw), msg.BodyStructure)
 			// These bytes are still transfer-encoded: base64 shows up as gibberish
 			// and quoted-printable leaks "=E2=80=94" and "=" soft line breaks.
 			text = string(decodeTransferBytes([]byte(text), previewEncoding(msg.BodyStructure)))
@@ -719,6 +723,64 @@ func base64PrefixLen(b []byte) int {
 		}
 	}
 	return len(b)
+}
+
+// mimeBoundaries returns every multipart boundary in the body structure tree.
+func mimeBoundaries(bs *imap.BodyStructure) []string {
+	if bs == nil {
+		return nil
+	}
+	var out []string
+	if strings.EqualFold(bs.MIMEType, "multipart") {
+		if b := bs.Params["boundary"]; b != "" {
+			out = append(out, b)
+		}
+	}
+	for _, p := range bs.Parts {
+		out = append(out, mimeBoundaries(p)...)
+	}
+	return out
+}
+
+// previewBody returns the readable start of the BODY[TEXT] bytes for a list
+// preview. For a single-part message that is the body itself. For a multipart
+// message BODY[TEXT] is the raw MIME body: leading boundary lines and part
+// headers (possibly nested) are skipped, and the text stops at the next
+// boundary so the following part's headers don't leak into the snippet.
+func previewBody(text string, bs *imap.BodyStructure) string {
+	bounds := mimeBoundaries(bs)
+	if len(bounds) == 0 {
+		return text
+	}
+	isBoundary := func(line string) bool {
+		for _, b := range bounds {
+			if strings.HasPrefix(line, "--"+b) {
+				return true
+			}
+		}
+		return false
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	i := 0
+	for i < len(lines) {
+		switch {
+		case strings.TrimSpace(lines[i]) == "":
+			i++
+		case isBoundary(lines[i]):
+			i++
+			for i < len(lines) && strings.TrimSpace(lines[i]) != "" { // part headers
+				i++
+			}
+		default:
+			goto body
+		}
+	}
+body:
+	var out []string
+	for ; i < len(lines) && !isBoundary(lines[i]); i++ {
+		out = append(out, lines[i])
+	}
+	return strings.Join(out, "\n")
 }
 
 // previewEncoding reports the Content-Transfer-Encoding that applies to the
