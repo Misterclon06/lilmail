@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -93,6 +94,50 @@ func (h *EmailHandler) buildThreads(username, folder string, emails []models.Ema
 	return api.ThreadMessages(emails)
 }
 
+// mailPageSize is the number of messages per list page.
+const mailPageSize = 50
+
+// maxMailPage bounds ?page= so (page-1)*mailPageSize cannot overflow uint32.
+const maxMailPage = 100000
+
+// pageParam parses the 1-based ?page= query value, clamped to [1, maxMailPage].
+func pageParam(c *fiber.Ctx) int {
+	p := c.QueryInt("page", 1)
+	if p < 1 {
+		return 1
+	}
+	if p > maxMailPage {
+		return maxMailPage
+	}
+	return p
+}
+
+// fetchPage returns one newest-first page of folder and whether older messages
+// exist. It asks for one extra message to detect a next page without a second
+// round trip, then drops that extra (the oldest, i.e. lowest UID).
+func fetchPage(client api.MailClient, folder string, page int) ([]models.Email, bool, error) {
+	offset := uint32((page - 1) * mailPageSize)
+	emails, err := client.FetchMessagesPaged(folder, mailPageSize+1, offset)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(emails) <= mailPageSize {
+		return emails, false, nil
+	}
+	oldest := len(emails) - 1
+	minID, perr := strconv.ParseUint(emails[oldest].ID, 10, 32)
+	for i, e := range emails {
+		id, err := strconv.ParseUint(e.ID, 10, 32)
+		if err != nil || perr != nil {
+			break
+		}
+		if id < minID {
+			minID, oldest = id, i
+		}
+	}
+	return append(emails[:oldest:oldest], emails[oldest+1:]...), true, nil
+}
+
 // HandleInbox renders the main inbox page.
 // When [accounts] is enabled and the user has additional accounts, and the
 // "unified" query parameter is set to "1" (or the user had it set last time),
@@ -141,6 +186,7 @@ func (h *EmailHandler) HandleInbox(c *fiber.Ctx) error {
 
 	var emails []models.Email
 	var accountErrors []AccountFetchResult
+	var hasMore bool
 
 	if unified && unifiedAvailable {
 		// Fan out to all accounts.
@@ -154,7 +200,7 @@ func (h *EmailHandler) HandleInbox(c *fiber.Ctx) error {
 		)
 	} else {
 		// Single-account path — unchanged behaviour.
-		emails, err = client.FetchMessages("INBOX", 50)
+		emails, hasMore, err = fetchPage(client, "INBOX", 1)
 		if err != nil {
 			return c.Status(500).SendString("Error fetching emails")
 		}
@@ -179,6 +225,8 @@ func (h *EmailHandler) HandleInbox(c *fiber.Ctx) error {
 		"Unified":          unified && unifiedAvailable,
 		"UnifiedAvailable": unifiedAvailable,
 		"AccountErrors":    accountErrors,
+		"HasMore":          hasMore,
+		"NextPage":         2,
 	})
 }
 
@@ -214,7 +262,7 @@ func (h *EmailHandler) HandleFolder(c *fiber.Ctx) error {
 	defer client.Close()
 
 	// Fetch folder emails
-	emails, err := client.FetchMessages(folderName, 50)
+	emails, hasMore, err := fetchPage(client, folderName, 1)
 	if err != nil {
 		return c.Status(500).SendString("Error fetching emails")
 	}
@@ -235,6 +283,8 @@ func (h *EmailHandler) HandleFolder(c *fiber.Ctx) error {
 		"Threads":       threads,
 		"CurrentFolder": folderName,
 		"Token":         token,
+		"HasMore":       hasMore,
+		"NextPage":      2,
 	})
 }
 
@@ -521,6 +571,8 @@ func (h *EmailHandler) HandleFolderEmails(c *fiber.Ctx) error {
 
 	var emails []models.Email
 	var accountErrors []AccountFetchResult
+	var hasMore bool
+	page := pageParam(c)
 
 	if unified && unifiedAvailable && folderName == "INBOX" {
 		emails, accountErrors = FetchUnified(
@@ -532,11 +584,15 @@ func (h *EmailHandler) HandleFolderEmails(c *fiber.Ctx) error {
 			50,
 		)
 	} else {
-		emails, err = client.FetchMessages(folderName, 50)
+		emails, hasMore, err = fetchPage(client, folderName, page)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{
 				"error": fmt.Sprintf("Error fetching emails: %v", err),
 			})
+		}
+		// Past the end (e.g. mailbox shrank): return nothing, not the empty state.
+		if page > 1 && len(emails) == 0 {
+			return c.SendString("")
 		}
 	}
 
@@ -554,6 +610,8 @@ func (h *EmailHandler) HandleFolderEmails(c *fiber.Ctx) error {
 		"Unified":          unified && unifiedAvailable,
 		"UnifiedAvailable": unifiedAvailable,
 		"AccountErrors":    accountErrors,
+		"HasMore":          hasMore,
+		"NextPage":         page + 1,
 	}, "") // Explicitly set no layout
 }
 

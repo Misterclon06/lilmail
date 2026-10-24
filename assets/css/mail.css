@@ -2488,3 +2488,6 @@ body[data-density="compact"] .email-row__unread-dot { top: 50%; }
   margin-top: auto;
 }
 .sidebar__nav { display: flex; flex-direction: column; }
+
+/* Infinite-scroll sentinel: needs height to enter the viewport (htmx "revealed"). */
+.list-more { min-height: 1px; padding: 12px; }

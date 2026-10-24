@@ -169,3 +169,9 @@
         {{end}}
     </div>
 {{end}}
+
+{{if .HasMore}}
+    <div class="list-more" hx-get="/api/folder/{{.CurrentFolder | urlEncode}}/emails?page={{.NextPage}}"
+         hx-trigger="revealed" hx-swap="outerHTML" hx-indicator="#list-spinner"></div>
+{{end}}
+
