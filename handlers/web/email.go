@@ -12,6 +12,7 @@ import (
 	"lilmail/utils"
 	"log"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -93,6 +94,29 @@ func (h *EmailHandler) buildThreads(username, folder string, emails []models.Ema
 	}
 	// Fallback: in-memory only (no bbolt persistence).
 	return api.ThreadMessages(emails)
+}
+
+// loadFolders returns the sidebar folders from the per-user cache written at
+// login. When the cache is missing or unreadable (cache directory cleared or
+// moved, a session that outlived it) it rebuilds it from IMAP instead of
+// failing every page with a 500; a failure to write it back is only logged.
+func (h *EmailHandler) loadFolders(client api.MailClient, userStr string) ([]*api.MailboxInfo, error) {
+	dir := filepath.Join(h.config.Cache.Folder, api.SanitizeUsername(userStr))
+	path := filepath.Join(dir, "folders.json")
+	var folders []*api.MailboxInfo
+	if err := utils.LoadCache(path, &folders); err == nil {
+		return folders, nil
+	}
+	folders, err := client.FetchFolders()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("folders: recreate cache dir for %s: %v", userStr, err)
+	} else if err := utils.SaveCache(path, folders); err != nil {
+		log.Printf("folders: rewrite cache for %s: %v", userStr, err)
+	}
+	return folders, nil
 }
 
 // folderPage is one rendered page of a folder list.
@@ -238,13 +262,6 @@ func (h *EmailHandler) HandleInbox(c *fiber.Ctx) error {
 	}
 	sessionEmail, _ := c.Locals("email").(string)
 
-	// Load folders from cache
-	userCacheFolder := filepath.Join(h.config.Cache.Folder, api.SanitizeUsername(userStr))
-	var folders []*api.MailboxInfo
-	if err := utils.LoadCache(filepath.Join(userCacheFolder, "folders.json"), &folders); err != nil {
-		return c.Status(500).SendString("Error loading folders")
-	}
-
 	// Get JWT token for API requests
 	token, err := api.GetSessionToken(c, h.store)
 	if err != nil {
@@ -267,6 +284,11 @@ func (h *EmailHandler) HandleInbox(c *fiber.Ctx) error {
 		return c.Status(500).SendString("Error connecting to email server")
 	}
 	defer client.Close()
+
+	folders, err := h.loadFolders(client, userStr)
+	if err != nil {
+		return c.Status(500).SendString("Error loading folders")
+	}
 
 	pg, err := h.loadFolderPage(client, userStr, sessionEmail, "INBOX", 1,
 		unified && unifiedAvailable, additionalAccounts)
@@ -309,19 +331,18 @@ func (h *EmailHandler) HandleFolder(c *fiber.Ctx) error {
 		return c.Redirect("/inbox")
 	}
 
-	// Load folders for sidebar
-	userCacheFolder := filepath.Join(h.config.Cache.Folder, api.SanitizeUsername(userStr))
-	var folders []*api.MailboxInfo
-	if err := utils.LoadCache(filepath.Join(userCacheFolder, "folders.json"), &folders); err != nil {
-		return c.Status(500).SendString("Error loading folders")
-	}
-
 	// Get IMAP client
 	client, err := h.auth.CreateIMAPClient(c)
 	if err != nil {
 		return c.Status(500).SendString("Error connecting to email server")
 	}
 	defer client.Close()
+
+	// Folders for the sidebar
+	folders, err := h.loadFolders(client, userStr)
+	if err != nil {
+		return c.Status(500).SendString("Error loading folders")
+	}
 
 	// Fetch folder emails
 	emails, hasMore, total, err := fetchPageTotal(client, folderName, 1)

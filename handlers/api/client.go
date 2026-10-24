@@ -2,6 +2,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"lilmail/models"
 	"log"
@@ -106,6 +107,15 @@ func searchWindow(total, limit, offset uint32) (start, end uint32, hasMore bool)
 	return start, end, start > 0
 }
 
+// ErrConnect and ErrLogin classify why opening an IMAP client failed, so callers
+// can tell "server unreachable / TLS mismatch / timeout" from "server answered
+// and rejected the credentials". The error text is unchanged ("connection
+// error: …", "login error: …"); test with errors.Is.
+var (
+	ErrConnect = errors.New("connection error")
+	ErrLogin   = errors.New("login error")
+)
+
 // Client represents an IMAP client wrapper
 type Client struct {
 	client   *client.Client
@@ -124,13 +134,13 @@ func dialIMAP(server string, port int, useTLS bool) (*client.Client, error) {
 		c, err = client.DialWithDialerTLS(imapDialer, addr, nil)
 		if err != nil {
 			log.Printf("DialTLS %s connection err: %v", addr, err)
-			return nil, fmt.Errorf("connection error: %v", err)
+			return nil, fmt.Errorf("%w: %v", ErrConnect, err)
 		}
 	} else {
 		c, err = client.DialWithDialer(imapDialer, addr)
 		if err != nil {
 			log.Printf("Dial (plain IMAP) %s connection err: %v", addr, err)
-			return nil, fmt.Errorf("connection error: %v", err)
+			return nil, fmt.Errorf("%w: %v", ErrConnect, err)
 		}
 	}
 	c.Timeout = imapCmdTimeout
@@ -171,7 +181,7 @@ func NewClientTLS(server string, port int, email, password string, useTLS bool) 
 	if err != nil {
 		c.Logout()
 		log.Printf("IMAP Login %s/xxx login err: %v", email, err)
-		return nil, fmt.Errorf("login error: %v", err)
+		return nil, fmt.Errorf("%w: %v", ErrLogin, err)
 	}
 
 	logTiming("imap connect+login", start)
@@ -203,7 +213,7 @@ func NewClientOAuth(server string, port int, username, accessToken, mechanism st
 	if err := c.Authenticate(auth); err != nil {
 		c.Logout()
 		log.Printf("IMAP OAuth2 (%s) login %s err: %v", mechanism, username, err)
-		return nil, fmt.Errorf("oauth2 login error: %v", err)
+		return nil, fmt.Errorf("oauth2 %w: %v", ErrLogin, err)
 	}
 
 	logTiming("imap connect+login (oauth2)", start)
