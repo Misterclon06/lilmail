@@ -25,9 +25,16 @@
 //	after:<date>        -> SINCE <date>         (internal-date, Since)
 //	older_than:<n><unit>-> BEFORE now-n         (Before)
 //	newer_than:<n><unit>-> SINCE now-n          (Since)
-//	"quoted phrase"     -> TEXT "quoted phrase" (header+body)
-//	free text           -> TEXT word            (header+body)
+//	body:X              -> BODY X               (body only; slow on servers without FTS)
+//	text:X              -> TEXT X               (header+body; slow on servers without FTS)
+//	"quoted phrase"     -> OR HEADER SUBJECT p HEADER FROM p
+//	free text           -> OR HEADER SUBJECT w HEADER FROM w
 //	-term               -> NOT ( term )         (negation of any of the above)
+//
+// Free text deliberately searches only Subject and From (Roundcube's default
+// search_mods): header-only SEARCH is cheap on any IMAP server, while TEXT/BODY
+// scans every message body and is slow without a server-side FTS index. Use
+// body:/text: to opt into a full-text scan.
 //
 // Multiple positive terms are ANDed (Gmail's default), which is the natural
 // semantics of a single imap.SearchCriteria: every populated field must match.
@@ -87,6 +94,8 @@ var knownOperators = map[string]bool{
 	"after":      true,
 	"older_than": true,
 	"newer_than": true,
+	"body":       true,
+	"text":       true,
 }
 
 // searchToken is one lexical unit of a query.
@@ -204,33 +213,13 @@ func sanitizeValue(s string) string {
 // `in:<folder>` operator, the mailbox to search instead of the caller's
 // default (empty string means "no override").
 //
-// When the query contains no operators, no quoted phrase and no negation, the
-// result is the historical raw-text fallback: a single TEXT match over the
-// whole (trimmed) query — preserving prior behaviour byte-for-byte for simple
-// queries.
+// Free-text words, quoted phrases and unmappable operators match the Subject or
+// From header (see headerOr); each word is ANDed with the rest.
 func parseSearchQuery(query string) (*imap.SearchCriteria, string) {
 	if len(query) > maxSearchQueryLen {
 		query = query[:maxSearchQueryLen]
 	}
 	toks := tokenizeSearch(query)
-
-	// Detect the "pure raw text" case: every token is a positive free-text
-	// bareword (no operators, phrases or negation). Preserve the legacy
-	// single-TEXT-match behaviour for those.
-	structured := false
-	for _, t := range toks {
-		if t.key != "" || t.phrase || t.neg {
-			structured = true
-			break
-		}
-	}
-	if !structured {
-		crit := imap.NewSearchCriteria()
-		if q := sanitizeValue(strings.TrimSpace(query)); q != "" {
-			crit.Text = []string{q}
-		}
-		return crit, ""
-	}
 
 	crit := imap.NewSearchCriteria()
 	folderOverride := ""
@@ -281,6 +270,10 @@ func parseSearchQuery(query string) (*imap.SearchCriteria, string) {
 			default:
 				applied = false // unknown is:<x> -> free text
 			}
+		case "body":
+			dst.Body = append(dst.Body, val)
+		case "text":
+			dst.Text = append(dst.Text, val)
 		case "in":
 			// Mailbox switch, not a criterion. Not negatable.
 			if f := resolveSearchFolder(val); f != "" && !t.neg {
@@ -318,8 +311,8 @@ func parseSearchQuery(query string) (*imap.SearchCriteria, string) {
 
 		if !applied {
 			// Couldn't map as an operator (unknown value / unparseable date /
-			// plain word): fall back to a TEXT match so nothing is silently
-			// dropped. Rebuild the display value for degraded operators.
+			// plain word): fall back to a Subject/From match so nothing is
+			// silently dropped. Rebuild the display value for degraded operators.
 			text := val
 			if t.key != "" {
 				text = sanitizeValue(t.key + ":" + t.value)
@@ -328,12 +321,9 @@ func parseSearchQuery(query string) (*imap.SearchCriteria, string) {
 				continue
 			}
 			if t.neg {
-				// neg is a fresh criteria; put TEXT there.
-				neg = imap.NewSearchCriteria()
-				neg.Text = []string{text}
-				crit.Not = append(crit.Not, neg)
+				crit.Not = append(crit.Not, headerOr(text))
 			} else {
-				crit.Text = append(crit.Text, text)
+				crit.Or = append(crit.Or, headerOr(text).Or[0])
 			}
 			continue
 		}
@@ -344,6 +334,18 @@ func parseSearchQuery(query string) (*imap.SearchCriteria, string) {
 	}
 
 	return crit, folderOverride
+}
+
+// headerOr matches v in the Subject or From header:
+// OR HEADER SUBJECT v HEADER FROM v. The returned criteria has exactly one Or pair.
+func headerOr(v string) *imap.SearchCriteria {
+	subj := imap.NewSearchCriteria()
+	subj.Header.Add("SUBJECT", v)
+	from := imap.NewSearchCriteria()
+	from.Header.Add("FROM", v)
+	c := imap.NewSearchCriteria()
+	c.Or = [][2]*imap.SearchCriteria{{subj, from}}
+	return c
 }
 
 // resolveSearchFolder maps an in:<folder> value to a mailbox name. Common

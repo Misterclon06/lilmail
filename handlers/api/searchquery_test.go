@@ -27,6 +27,20 @@ func hdr(t *testing.T, c *imap.SearchCriteria, key, want string) {
 	t.Fatalf("Header[%q] = %v; want to contain %q", key, vals, want)
 }
 
+// orTerms returns the values of every free-text term in c.Or, asserting each is
+// a Subject/From pair carrying the same value.
+func orTerms(t *testing.T, c *imap.SearchCriteria) []string {
+	t.Helper()
+	var out []string
+	for _, pair := range c.Or {
+		hdr(t, pair[0], "SUBJECT", pair[0].Header.Get("Subject"))
+		v := pair[0].Header.Get("Subject")
+		hdr(t, pair[1], "FROM", v)
+		out = append(out, v)
+	}
+	return out
+}
+
 func hasFlag(flags []string, f string) bool {
 	for _, x := range flags {
 		if x == f {
@@ -130,8 +144,8 @@ func TestParse_RelativeDates(t *testing.T) {
 
 func TestParse_QuotedPhrase(t *testing.T) {
 	c, _ := parseSearchQuery(`"quarterly report"`)
-	if len(c.Text) != 1 || c.Text[0] != "quarterly report" {
-		t.Fatalf("phrase -> Text=%v; want [quarterly report]", c.Text)
+	if got := orTerms(t, c); len(got) != 1 || got[0] != "quarterly report" || len(c.Text) != 0 {
+		t.Fatalf("phrase -> Or=%v Text=%v; want Or=[quarterly report], no Text", got, c.Text)
 	}
 	// Operator value may itself be quoted.
 	c, _ = parseSearchQuery(`from:"john doe"`)
@@ -145,10 +159,13 @@ func TestParse_Negation(t *testing.T) {
 	}
 	hdr(t, c.Not[0], "FROM", "spammer")
 
-	// Negated free text becomes NOT ( TEXT ... ).
+	// Negated free text becomes NOT ( OR SUBJECT/FROM ... ).
 	c, _ = parseSearchQuery(`-urgent`)
-	if len(c.Not) != 1 || len(c.Not[0].Text) != 1 || c.Not[0].Text[0] != "urgent" {
+	if len(c.Not) != 1 {
 		t.Fatalf("negated free text -> Not=%+v", c.Not)
+	}
+	if got := orTerms(t, c.Not[0]); len(got) != 1 || got[0] != "urgent" {
+		t.Fatalf("negated free text -> Not Or=%v", got)
 	}
 }
 
@@ -167,18 +184,16 @@ func TestParse_Combined(t *testing.T) {
 	// negated free text.
 	foundDraftNot := false
 	for _, n := range c.Not {
-		for _, txt := range n.Text {
-			if txt == "draft" {
-				foundDraftNot = true
-			}
+		if hasFlag(orTerms(t, n), "draft") {
+			foundDraftNot = true
 		}
 	}
 	if !foundDraftNot {
-		t.Fatalf("-draft not mapped to NOT(TEXT draft); Not=%+v", c.Not)
+		t.Fatalf("-draft not mapped to NOT(Subject/From draft); Not=%+v", c.Not)
 	}
-	// free text "newsletter" is a TEXT term.
-	if !hasFlag(c.Text, "newsletter") {
-		t.Fatalf("free text newsletter missing from Text=%v", c.Text)
+	// free text "newsletter" is a Subject/From term.
+	if !hasFlag(orTerms(t, c), "newsletter") {
+		t.Fatalf("free text newsletter missing from Or=%v", c.Or)
 	}
 }
 
@@ -189,35 +204,57 @@ func TestParse_UnknownOperator(t *testing.T) {
 	if folder != "" {
 		t.Fatalf("unexpected folder %q", folder)
 	}
-	if !hasFlag(c.Text, "label:important") {
-		t.Fatalf("unknown operator -> Text=%v; want to contain label:important", c.Text)
+	if !hasFlag(orTerms(t, c), "label:important") {
+		t.Fatalf("unknown operator -> Or=%v; want to contain label:important", c.Or)
 	}
 	// Unknown value on a known operator (has:foo) also degrades to text.
 	c, _ = parseSearchQuery(`has:foo`)
-	if !hasFlag(c.Text, "has:foo") {
-		t.Fatalf("has:foo -> Text=%v; want to contain has:foo", c.Text)
+	if !hasFlag(orTerms(t, c), "has:foo") {
+		t.Fatalf("has:foo -> Or=%v; want to contain has:foo", c.Or)
 	}
 	// Unparseable date degrades to text.
 	c, _ = parseSearchQuery(`before:notadate`)
-	if !hasFlag(c.Text, "before:notadate") {
-		t.Fatalf("before:notadate -> Text=%v; want to contain before:notadate", c.Text)
+	if !hasFlag(orTerms(t, c), "before:notadate") {
+		t.Fatalf("before:notadate -> Or=%v; want to contain before:notadate", c.Or)
 	}
 }
 
-// --- raw-text fallback ------------------------------------------------------
+// --- plain free text --------------------------------------------------------
 
-func TestParse_RawTextFallback(t *testing.T) {
-	// No operators, no quotes, no negation -> single TEXT of the whole query
-	// (preserves legacy behaviour).
+func TestParse_PlainWords(t *testing.T) {
+	// No operators: each word is ANDed, matched against Subject OR From only.
+	// The body is never scanned unless body:/text: is used.
 	c, folder := parseSearchQuery(`big invoice from vendor`)
 	if folder != "" {
 		t.Fatalf("unexpected folder %q", folder)
 	}
-	if len(c.Text) != 1 || c.Text[0] != "big invoice from vendor" {
-		t.Fatalf("raw fallback -> Text=%v; want single whole-query term", c.Text)
+	got := orTerms(t, c)
+	if len(got) != 4 || got[0] != "big" || got[3] != "vendor" {
+		t.Fatalf("plain words -> Or=%v; want 4 terms", got)
 	}
-	if len(c.Header) != 0 || len(c.Not) != 0 {
-		t.Fatalf("raw fallback should have no header/not criteria: %+v", c)
+	if len(c.Text) != 0 || len(c.Body) != 0 || len(c.Header) != 0 || len(c.Not) != 0 {
+		t.Fatalf("plain words must not scan the body: %+v", c)
+	}
+}
+
+func TestParse_BodyAndTextOperators(t *testing.T) {
+	c, _ := parseSearchQuery(`body:invoice text:receipt`)
+	if len(c.Body) != 1 || c.Body[0] != "invoice" {
+		t.Fatalf("body: -> Body=%v", c.Body)
+	}
+	if len(c.Text) != 1 || c.Text[0] != "receipt" {
+		t.Fatalf("text: -> Text=%v", c.Text)
+	}
+	if len(c.Or) != 0 {
+		t.Fatalf("body:/text: must not add header terms: %v", c.Or)
+	}
+}
+
+func TestParse_PlainWordsWireFormat(t *testing.T) {
+	c, _ := parseSearchQuery(`alice`)
+	wire := encodeSearch(t, c)
+	if !strings.Contains(wire, "OR") || strings.Contains(wire, "TEXT") || strings.Contains(wire, "BODY") {
+		t.Fatalf("wire = %q; want OR HEADER ... without TEXT/BODY", wire)
 	}
 }
 
