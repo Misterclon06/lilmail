@@ -28,27 +28,33 @@ import (
 // CR/LF/quote in an operator value is not possible. limit caps the number of
 // results returned.
 func (c *Client) SearchMessages(folderName, query string, limit uint32) ([]models.Email, error) {
+	emails, _, err := c.SearchMessagesPaged(folderName, query, limit, 0)
+	return emails, err
+}
+
+// SearchMessagesPaged is SearchMessages with paging: it skips the newest
+// `offset` matches, returns up to `limit` of the rest (newest first by UID) and
+// reports whether older matches remain. The SEARCH itself returns only UIDs, so
+// paging costs one extra FETCH of `limit` messages, not of the whole result set.
+func (c *Client) SearchMessagesPaged(folderName, query string, limit, offset uint32) ([]models.Email, bool, error) {
 	criteria, folderOverride := parseSearchQuery(query)
 	if folderOverride != "" {
 		folderName = folderOverride
 	}
 
 	if _, err := c.client.Select(folderName, true); err != nil {
-		return nil, fmt.Errorf("search: select %s: %w", folderName, err)
+		return nil, false, fmt.Errorf("search: select %s: %w", folderName, err)
 	}
 
 	uids, err := c.client.UidSearch(criteria)
 	if err != nil {
-		return nil, fmt.Errorf("search: uid search: %w", err)
+		return nil, false, fmt.Errorf("search: uid search: %w", err)
 	}
-	if len(uids) == 0 {
-		return []models.Email{}, nil
+	start, end, hasMore := searchWindow(uint32(len(uids)), limit, offset)
+	if start == end {
+		return []models.Email{}, false, nil
 	}
-
-	// Cap result set.
-	if limit > 0 && uint32(len(uids)) > limit {
-		uids = uids[uint32(len(uids))-limit:]
-	}
+	uids = uids[start:end]
 
 	seqSet := new(imap.SeqSet)
 	for _, uid := range uids {
@@ -79,9 +85,23 @@ func (c *Client) SearchMessages(folderName, query string, limit uint32) ([]model
 		emails = append(emails, email)
 	}
 	if err := <-fetchDone; err != nil {
-		return emails, fmt.Errorf("search: fetch: %w", err)
+		return emails, hasMore, fmt.Errorf("search: fetch: %w", err)
 	}
-	return emails, nil
+	return emails, hasMore, nil
+}
+
+// searchWindow picks the slice [start,end) of an ascending UID list holding the
+// page that skips the newest `offset` entries and takes up to `limit` (0 = all).
+// hasMore reports whether older entries remain before start.
+func searchWindow(total, limit, offset uint32) (start, end uint32, hasMore bool) {
+	if offset >= total {
+		return 0, 0, false
+	}
+	end = total - offset
+	if limit > 0 && end > limit {
+		start = end - limit
+	}
+	return start, end, start > 0
 }
 
 // Client represents an IMAP client wrapper

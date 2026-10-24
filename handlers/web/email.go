@@ -112,6 +112,12 @@ func pageParam(c *fiber.Ctx) int {
 	return p
 }
 
+// searchPager is implemented by clients that can page search results
+// (*api.Client). Others (demo mode) fall back to a single capped page.
+type searchPager interface {
+	SearchMessagesPaged(folder, query string, limit, offset uint32) ([]models.Email, bool, error)
+}
+
 // fetchPage returns one newest-first page of folder and whether older messages
 // exist. It asks for one extra message to detect a next page without a second
 // round trip, then drops that extra (the oldest, i.e. lowest UID).
@@ -382,7 +388,7 @@ func (h *EmailHandler) HandleEmailView(c *fiber.Ctx) error {
 	var preparedHTML string
 	var hasRemote bool
 	if email.HTML != "" {
-		preparedHTML, hasRemote = prepareEmailHTML(email.HTML)
+		preparedHTML, hasRemote = prepareEmailHTML(email.HTML, c.Query("images") == "1")
 	}
 
 	// Sanitize the HTML that feeds the Edit-Draft path. The email-viewer template
@@ -400,6 +406,7 @@ func (h *EmailHandler) HandleEmailView(c *fiber.Ctx) error {
 		"EmailHTML":     preparedHTML,
 		"EditableHTML":  editableHTML,
 		"HasRemote":     hasRemote,
+		"AuthHeader":    token,
 		"Self":          self,
 		"CurrentFolder": folderName,
 		"IsDrafts":      isDrafts,
@@ -1069,10 +1076,21 @@ func (h *EmailHandler) HandleSearch(c *fiber.Ctx) error {
 	}
 	defer client.Close()
 
-	emails, err := client.SearchMessages(folderName, query, 50)
+	page := pageParam(c)
+	var emails []models.Email
+	var hasMore bool
+	if sp, ok := client.(searchPager); ok {
+		emails, hasMore, err = sp.SearchMessagesPaged(folderName, query, mailPageSize, uint32((page-1)*mailPageSize))
+	} else {
+		emails, err = client.SearchMessages(folderName, query, mailPageSize)
+	}
 	if err != nil {
 		log.Printf("HandleSearch: %v", err)
 		return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("Search failed: %v", err)})
+	}
+	// Past the end: return nothing rather than the "No results" empty state.
+	if page > 1 && len(emails) == 0 {
+		return c.SendString("")
 	}
 
 	threads := h.buildThreads(userStr, folderName+":search:"+query, emails)
@@ -1083,5 +1101,7 @@ func (h *EmailHandler) HandleSearch(c *fiber.Ctx) error {
 		"CurrentFolder": folderName,
 		"Token":         token,
 		"SearchQuery":   query,
+		"HasMore":       hasMore,
+		"NextPage":      page + 1,
 	}, "")
 }
