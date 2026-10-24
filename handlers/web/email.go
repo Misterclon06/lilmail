@@ -119,7 +119,7 @@ func (h *EmailHandler) loadFolderPage(client api.MailClient, userStr, sessionEma
 	var p folderPage
 	if unified {
 		if page > maxUnifiedPage {
-			page = maxUnifiedPage
+			return p, nil // past the last unified page: empty (not a repeat of the last one)
 		}
 		p.Emails, p.HasMore, p.AccountErrors = FetchUnifiedPage(
 			client,
@@ -1174,12 +1174,11 @@ func (h *EmailHandler) HandleSearch(c *fiber.Ctx) error {
 	)
 	defer api.LogTiming("search "+folderName, time.Now())
 	if useUnified {
-		if page > maxUnifiedPage {
-			page = maxUnifiedPage
+		if page <= maxUnifiedPage { // beyond it: empty, handled below
+			emails, hasMore, accountErrors = SearchUnifiedPage(client, sessionEmail, "", "",
+				additionalAccounts, h.auth, folderName, query, mods, page)
+			threads = api.ThreadMessages(emails)
 		}
-		emails, hasMore, accountErrors = SearchUnifiedPage(client, sessionEmail, "", "",
-			additionalAccounts, h.auth, folderName, query, mods, page)
-		threads = api.ThreadMessages(emails)
 	} else {
 		if sp, ok := client.(searchPager); ok {
 			emails, hasMore, err = sp.SearchMessagesPaged(folderName, query, mods, mailPageSize, uint32((page-1)*mailPageSize))
