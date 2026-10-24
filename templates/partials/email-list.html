@@ -173,6 +173,9 @@
     </div>
 {{end}}
 
+{{if .Capped}}
+    <div class="list-note">Showing the 1000 most recent messages across all accounts. Open a single account's folder to reach older mail.</div>
+{{end}}
 {{if .HasMore}}
     <div class="list-more" hx-get="{{if .SearchQuery}}/api/search?q={{.SearchQuery | urlquery}}&folder={{.CurrentFolder | urlquery}}&mods={{.SearchMods | urlquery}}&page={{.NextPage}}{{if .Unified}}&unified=1{{end}}{{else}}/api/folder/{{.CurrentFolder | urlEncode}}/emails?page={{.NextPage}}{{if .Unified}}&unified=1{{end}}{{end}}"
          hx-trigger="intersect once" hx-swap="outerHTML" hx-indicator="#list-spinner"></div>

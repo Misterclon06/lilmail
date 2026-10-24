@@ -33,8 +33,13 @@ type AccountEntry struct {
 	// IMAPServer and SMTPServer override the global config values.
 	IMAPServer string `json:"imap_server"`
 	IMAPPort   int    `json:"imap_port"`
-	SMTPServer string `json:"smtp_server"`
-	SMTPPort   int    `json:"smtp_port"`
+	// IMAPPlaintext connects without TLS (plain IMAP, e.g. port 143). The zero
+	// value is TLS, so entries stored before this field existed keep using TLS.
+	// Only ever set for loopback hosts or the server the operator configured
+	// with [imap] tls = false (see plainIMAPAllowed).
+	IMAPPlaintext bool   `json:"imap_plaintext,omitempty"`
+	SMTPServer    string `json:"smtp_server"`
+	SMTPPort      int    `json:"smtp_port"`
 	// EncryptedPassword is AES-GCM ciphertext of the account password.
 	// Encrypted with the same key as session credentials.
 	EncryptedPassword string `json:"encrypted_password"`

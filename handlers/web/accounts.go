@@ -19,6 +19,7 @@ import (
 	"lilmail/config"
 	"lilmail/handlers/api"
 	"log"
+	"net"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -107,6 +108,9 @@ func (h *AccountsHandler) HandleAddAccount(c *fiber.Ctx) error {
 		Color      string `json:"color"`
 		IMAPServer string `json:"imap_server"`
 		IMAPPort   int    `json:"imap_port"`
+		// IMAPTLS selects implicit TLS for an explicit imap_server (omitted = TLS).
+		// An account on the globally configured server always inherits [imap] tls.
+		IMAPTLS    *bool  `json:"imap_tls"`
 		SMTPServer string `json:"smtp_server"`
 		SMTPPort   int    `json:"smtp_port"`
 	}
@@ -121,6 +125,7 @@ func (h *AccountsHandler) HandleAddAccount(c *fiber.Ctx) error {
 	}
 
 	// Fill in defaults from global config when not specified.
+	usesGlobalIMAP := req.IMAPServer == ""
 	if req.IMAPServer == "" {
 		req.IMAPServer = h.config.IMAP.Server
 	}
@@ -146,8 +151,17 @@ func (h *AccountsHandler) HandleAddAccount(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid email format")
 	}
 
+	plaintext := !h.config.IMAP.TLS
+	if !usesGlobalIMAP {
+		plaintext = req.IMAPTLS != nil && !*req.IMAPTLS
+	}
+	if plaintext && !plainIMAPAllowed(req.IMAPServer, h.config) {
+		return fiber.NewError(fiber.StatusBadRequest,
+			"plain (non-TLS) IMAP is only allowed for localhost or the server configured with [imap] tls = false")
+	}
+
 	// Validate credentials by opening and immediately closing an IMAP connection.
-	client, err := api.NewClient(req.IMAPServer, req.IMAPPort, username, req.Password)
+	client, err := api.NewClientTLS(req.IMAPServer, req.IMAPPort, username, req.Password, !plaintext)
 	if err != nil {
 		return fiber.NewError(fiber.StatusUnauthorized, fmt.Sprintf("IMAP login failed: %v", err))
 	}
@@ -166,6 +180,7 @@ func (h *AccountsHandler) HandleAddAccount(c *fiber.Ctx) error {
 		Color:             req.Color,
 		IMAPServer:        req.IMAPServer,
 		IMAPPort:          req.IMAPPort,
+		IMAPPlaintext:     plaintext,
 		SMTPServer:        req.SMTPServer,
 		SMTPPort:          req.SMTPPort,
 		EncryptedPassword: encPwd,
@@ -243,7 +258,7 @@ func (h *AccountsHandler) HandleSwitchAccount(c *fiber.Ctx) error {
 	}
 
 	// Validate the target credentials are still good.
-	client, err := api.NewClient(target.IMAPServer, target.IMAPPort, targetUsername, password)
+	client, err := api.NewClientTLS(target.IMAPServer, target.IMAPPort, targetUsername, password, !target.IMAPPlaintext)
 	if err != nil {
 		return fiber.NewError(fiber.StatusUnauthorized, fmt.Sprintf("IMAP login failed for target account: %v", err))
 	}
@@ -353,4 +368,19 @@ func (h *AccountsHandler) HandleSettings(c *fiber.Ctx) error {
 		"Accounts":        safe,
 		"AccountsEnabled": h.config.Accounts.Enabled,
 	})
+}
+
+// plainIMAPAllowed reports whether an account may use unencrypted IMAP to host.
+// The password crosses the wire in clear text, so it is limited to loopback
+// addresses (literal check, no DNS lookup) and to the exact server the operator
+// already configured with [imap] tls = false.
+func plainIMAPAllowed(host string, cfg *config.Config) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return !cfg.IMAP.TLS && strings.EqualFold(host, cfg.IMAP.Server)
 }

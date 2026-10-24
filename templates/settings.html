@@ -123,6 +123,12 @@
                                        placeholder="993">
                             </div>
                             <div class="form-row">
+                                <label class="form-label">
+                                    <input type="checkbox" x-model="form.imap_tls"> Use TLS (recommended)
+                                </label>
+                                <small>Untick only for IMAP on localhost, or the server you set with <code>tls = false</code> in config.toml.</small>
+                            </div>
+                            <div class="form-row">
                                 <label class="form-label">SMTP server</label>
                                 <input type="text" x-model="form.smtp_server" class="form-input"
                                        placeholder="(use default)">
@@ -237,6 +243,7 @@ function addAccountForm() {
             color: '#4285F4',
             imap_server: '',
             imap_port: 0,
+            imap_tls: true,
             smtp_server: '',
             smtp_port: 0,
         },

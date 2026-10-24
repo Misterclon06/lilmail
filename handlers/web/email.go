@@ -102,6 +102,7 @@ type folderPage struct {
 	HasMore       bool
 	Total         uint32 // folder size, 0 when unknown or not the first page
 	AccountErrors []AccountFetchResult
+	Capped        bool // unified list hit maxUnifiedPage with older mail remaining
 }
 
 // loadFolderPage fetches one page of folder and threads it. unified merges all
@@ -121,11 +122,11 @@ func (h *EmailHandler) loadFolderPage(client api.MailClient, userStr, sessionEma
 		if page > maxUnifiedPage {
 			return p, nil // past the last unified page: empty (not a repeat of the last one)
 		}
-		p.Emails, p.HasMore, p.AccountErrors = FetchUnifiedPage(
+		p.Emails, p.HasMore, p.Capped, p.AccountErrors = FetchUnifiedPage(
 			client,
 			sessionEmail, "", "", // primary has no badge in unified when label is ""
 			accounts, h.auth, folder, page)
-		p.Threads = api.ThreadMessages(p.Emails)
+		p.Threads = threadPerAccount(p.Emails)
 		return p, nil
 	}
 	var err error
@@ -285,6 +286,7 @@ func (h *EmailHandler) HandleInbox(c *fiber.Ctx) error {
 		"UnifiedAvailable": unifiedAvailable,
 		"AccountErrors":    pg.AccountErrors,
 		"HasMore":          pg.HasMore,
+		"Capped":           pg.Capped,
 		"NextPage":         2,
 		"Total":            pg.Total,
 	})
@@ -698,6 +700,7 @@ func (h *EmailHandler) renderFolderList(c *fiber.Ctx, folderName string) error {
 		"UnifiedAvailable": unifiedAvailable,
 		"AccountErrors":    pg.AccountErrors,
 		"HasMore":          pg.HasMore,
+		"Capped":           pg.Capped,
 		"NextPage":         page + 1,
 		"Total":            pg.Total,
 	}, "") // Explicitly set no layout
@@ -1170,14 +1173,15 @@ func (h *EmailHandler) HandleSearch(c *fiber.Ctx) error {
 		emails        []models.Email
 		threads       []models.Thread
 		hasMore       bool
+		capped        bool
 		accountErrors []AccountFetchResult
 	)
 	defer api.LogTiming("search "+folderName, time.Now())
 	if useUnified {
 		if page <= maxUnifiedPage { // beyond it: empty, handled below
-			emails, hasMore, accountErrors = SearchUnifiedPage(client, sessionEmail, "", "",
+			emails, hasMore, capped, accountErrors = SearchUnifiedPage(client, sessionEmail, "", "",
 				additionalAccounts, h.auth, folderName, query, mods, page)
-			threads = api.ThreadMessages(emails)
+			threads = threadPerAccount(emails)
 		}
 	} else {
 		if sp, ok := client.(searchPager); ok {
@@ -1207,6 +1211,7 @@ func (h *EmailHandler) HandleSearch(c *fiber.Ctx) error {
 		"UnifiedAvailable": unifiedAvailable,
 		"AccountErrors":    accountErrors,
 		"HasMore":          hasMore,
+		"Capped":           capped,
 		"NextPage":         page + 1,
 	}, "")
 }

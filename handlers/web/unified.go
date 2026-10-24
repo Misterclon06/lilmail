@@ -198,17 +198,44 @@ func FetchUnified(
 const maxUnifiedPage = 20
 
 // unifiedPage returns the date-descending window for a 1-based page of a merged
-// unified list and whether further pages exist.
-func unifiedPage(merged []models.Email, anyMore bool, page int) ([]models.Email, bool) {
+// unified list, whether further pages exist, and whether the list stops at
+// maxUnifiedPage while accounts still hold older mail (capped: the UI says so
+// instead of just ending).
+func unifiedPage(merged []models.Email, anyMore bool, page int) (window []models.Email, hasMore, capped bool) {
 	start := (page - 1) * mailPageSize
 	end := start + mailPageSize
 	if start >= len(merged) {
-		return nil, false
+		return nil, false, false
 	}
 	if end > len(merged) {
 		end = len(merged)
 	}
-	return merged[start:end], end < len(merged) || (anyMore && page < maxUnifiedPage)
+	more := end < len(merged) || anyMore
+	if page >= maxUnifiedPage {
+		return merged[start:end], false, more
+	}
+	return merged[start:end], more, false
+}
+
+// threadPerAccount threads each account's messages separately and merges the
+// threads by newest message. UIDs and Message-IDs are only meaningful within
+// one mailbox, and subject grouping must not fuse two accounts' unrelated
+// mail that merely share a subject (e.g. identical newsletters).
+func threadPerAccount(emails []models.Email) []models.Thread {
+	byAcct := map[string][]models.Email{}
+	var order []string
+	for _, e := range emails {
+		if _, ok := byAcct[e.AccountEmail]; !ok {
+			order = append(order, e.AccountEmail)
+		}
+		byAcct[e.AccountEmail] = append(byAcct[e.AccountEmail], e)
+	}
+	var out []models.Thread
+	for _, acct := range order {
+		out = append(out, api.ThreadMessages(byAcct[acct])...)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Latest.Date.After(out[j].Latest.Date) })
+	return out
 }
 
 // FetchUnifiedPage lists one page of the unified folder view. Accounts have
@@ -222,11 +249,11 @@ func FetchUnifiedPage(
 	auth *AuthHandler,
 	folder string,
 	page int,
-) ([]models.Email, bool, []AccountFetchResult) {
+) ([]models.Email, bool, bool, []AccountFetchResult) {
 	merged, more, results := fetchUnifiedMerged(primaryClient, primaryEmail, primaryLabel, primaryColor,
 		entries, auth, uint32(page*mailPageSize), folderFetcher(folder))
-	window, hasMore := unifiedPage(merged, more, page)
-	return window, hasMore, results
+	window, hasMore, capped := unifiedPage(merged, more, page)
+	return window, hasMore, capped, results
 }
 
 // SearchUnifiedPage is FetchUnifiedPage for a search across all accounts.
@@ -238,11 +265,11 @@ func SearchUnifiedPage(
 	folder, query string,
 	mods []string,
 	page int,
-) ([]models.Email, bool, []AccountFetchResult) {
+) ([]models.Email, bool, bool, []AccountFetchResult) {
 	merged, more, results := fetchUnifiedMerged(primaryClient, primaryEmail, primaryLabel, primaryColor,
 		entries, auth, uint32(page*mailPageSize), searchFetcher(folder, query, mods))
-	window, hasMore := unifiedPage(merged, more, page)
-	return window, hasMore, results
+	window, hasMore, capped := unifiedPage(merged, more, page)
+	return window, hasMore, capped, results
 }
 
 // fetchUnifiedMerged runs fn against the primary client and every additional

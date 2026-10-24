@@ -365,7 +365,7 @@ func (h *AuthHandler) CreateIMAPClientForAccount(entry AccountEntry) (api.MailCl
 		return nil, fmt.Errorf("invalid email format for account %s", entry.Email)
 	}
 
-	return api.NewClient(entry.IMAPServer, entry.IMAPPort, username, password)
+	return api.NewClientTLS(entry.IMAPServer, entry.IMAPPort, username, password, !entry.IMAPPlaintext)
 }
 
 // CreateSMTPClientForAccount opens an SMTP connection for a stored additional
