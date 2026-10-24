@@ -14,6 +14,7 @@ import (
 // so this guards against unbalanced {{end}} / unknown functions at runtime.
 func TestTemplatesParse(t *testing.T) {
 	engine := html.New("./templates", ".html")
+	engine.AddFunc("asset", func(p string) string { return p })
 	engine.AddFunc("split", strings.Split)
 	engine.AddFunc("join", strings.Join)
 	engine.AddFunc("lower", strings.ToLower)

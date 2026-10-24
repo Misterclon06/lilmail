@@ -162,6 +162,10 @@ func main() {
 	}
 	engine := html.NewFileSystem(http.FS(tplSub), ".html")
 
+	// Cache-busting URLs for css/js (see assetver.go).
+	assetVer := newAssetVersioner(assetsFS)
+	engine.AddFunc("asset", assetVer.URL)
+
 	// String manipulation functions
 	engine.AddFunc("split", strings.Split)
 	engine.AddFunc("join", strings.Join)
@@ -280,9 +284,14 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to sub assets FS:", err)
 	}
+	// Cache-Control is set here, not via filesystem.Config.MaxAge: it depends on
+	// whether the URL carries a ?v= content hash (see assetver.go).
+	app.Use("/assets", func(c *fiber.Ctx) error {
+		c.Set("Cache-Control", assetCacheControl(c.Query("v") != ""))
+		return c.Next()
+	})
 	app.Use("/assets", filesystem.New(filesystem.Config{
 		Root:         http.FS(assetsSub),
-		MaxAge:       int(24 * time.Hour / time.Second),
 		NotFoundFile: "",
 	}))
 
