@@ -91,6 +91,11 @@ window.openMessage = function (el) {
     const headers = { 'X-Folder': d.folder || 'INBOX' };
     if (d.account) headers['X-Account-Email'] = d.account;
     const url = '/api/email/' + encodeURIComponent(d.id);
+    // The server marks the message read when it is opened; mirror that in the
+    // list row so it stops looking new without reloading the list.
+    el.classList.remove('is-unread');
+    const dot = el.querySelector('.email-row__unread-dot');
+    if (dot) dot.remove();
     void htmx.ajax('GET', url, { target: '#email-viewer-pane', swap: 'innerHTML', headers: headers });
     if (window.innerWidth < 1024) {
         void htmx.ajax('GET', url, { target: '#email-viewer-pane-mobile', swap: 'innerHTML', headers: headers });

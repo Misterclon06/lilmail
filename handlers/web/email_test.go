@@ -211,3 +211,21 @@ func trimSpace(s string) string {
 	}
 	return s
 }
+
+// Opening a message marks it read only when \Seen is not already set.
+func TestHasSeenFlag(t *testing.T) {
+	cases := []struct {
+		flags []string
+		want  bool
+	}{
+		{nil, false},
+		{[]string{`\Flagged`}, false},
+		{[]string{`\Flagged`, `\Seen`}, true},
+		{[]string{`\seen`}, true},
+	}
+	for _, tc := range cases {
+		if got := hasSeenFlag(tc.flags); got != tc.want {
+			t.Errorf("hasSeenFlag(%v) = %v, want %v", tc.flags, got, tc.want)
+		}
+	}
+}
