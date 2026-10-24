@@ -30,6 +30,15 @@ func TestSMTPModeForAccount(t *testing.T) {
 		}
 	}
 
+	// A non-465 port can be forced to implicit TLS per account; it never changes a
+	// STARTTLS-by-convention account that did not ask for it.
+	if tls, _ := smtpModeForAccount(AccountEntry{SMTPServer: "smtp.other.com", SMTPPort: 2465, SMTPImplicitTLS: true}, cfg); tls {
+		t.Error("SMTPImplicitTLS on port 2465 should use implicit TLS (startTLS=false)")
+	}
+	if tls, _ := smtpModeForAccount(AccountEntry{SMTPServer: "smtp.other.com", SMTPPort: 2465}, cfg); !tls {
+		t.Error("port 2465 without the flag follows the convention: STARTTLS")
+	}
+
 	// Global implicit-TLS setup (use_starttls = false) is inherited by its own accounts.
 	cfg.SMTP.Port, cfg.SMTP.UseSTARTTLS, cfg.SMTP.InsecureSkipVerify = 465, false, false
 	if tls, skip := smtpModeForAccount(AccountEntry{SMTPServer: "smtp.home.lan", SMTPPort: 465}, cfg); tls || skip {

@@ -91,9 +91,9 @@ window.openMessage = function (el) {
     const headers = { 'X-Folder': d.folder || 'INBOX' };
     if (d.account) headers['X-Account-Email'] = d.account;
     const url = '/api/email/' + encodeURIComponent(d.id);
-    htmx.ajax('GET', url, { target: '#email-viewer-pane', swap: 'innerHTML', headers: headers });
+    void htmx.ajax('GET', url, { target: '#email-viewer-pane', swap: 'innerHTML', headers: headers });
     if (window.innerWidth < 1024) {
-        htmx.ajax('GET', url, { target: '#email-viewer-pane-mobile', swap: 'innerHTML', headers: headers });
+        void htmx.ajax('GET', url, { target: '#email-viewer-pane-mobile', swap: 'innerHTML', headers: headers });
     }
 };
 

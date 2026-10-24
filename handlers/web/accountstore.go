@@ -40,6 +40,10 @@ type AccountEntry struct {
 	IMAPPlaintext bool   `json:"imap_plaintext,omitempty"`
 	SMTPServer    string `json:"smtp_server"`
 	SMTPPort      int    `json:"smtp_port"`
+	// SMTPImplicitTLS forces TLS from the first byte (SMTPS) on a port other than
+	// 465. The zero value follows the port convention (465 = implicit TLS, any
+	// other port = STARTTLS), so entries stored before this field are unchanged.
+	SMTPImplicitTLS bool `json:"smtp_implicit_tls,omitempty"`
 	// EncryptedPassword is AES-GCM ciphertext of the account password.
 	// Encrypted with the same key as session credentials.
 	EncryptedPassword string `json:"encrypted_password"`

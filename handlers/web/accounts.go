@@ -113,6 +113,8 @@ func (h *AccountsHandler) HandleAddAccount(c *fiber.Ctx) error {
 		IMAPTLS    *bool  `json:"imap_tls"`
 		SMTPServer string `json:"smtp_server"`
 		SMTPPort   int    `json:"smtp_port"`
+		// SMTPImplicitTLS: implicit TLS on a non-465 port (see AccountEntry).
+		SMTPImplicitTLS bool `json:"smtp_implicit_tls"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
@@ -183,6 +185,7 @@ func (h *AccountsHandler) HandleAddAccount(c *fiber.Ctx) error {
 		IMAPPlaintext:     plaintext,
 		SMTPServer:        req.SMTPServer,
 		SMTPPort:          req.SMTPPort,
+		SMTPImplicitTLS:   req.SMTPImplicitTLS,
 		EncryptedPassword: encPwd,
 	}
 	if err := h.acctStore.Save(owner, entry); err != nil {

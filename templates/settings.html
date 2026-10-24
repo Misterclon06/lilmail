@@ -139,6 +139,12 @@
                                        placeholder="587">
                                 <small>465 uses implicit TLS; any other port uses STARTTLS. Certificates are always verified for a server of its own.</small>
                             </div>
+                            <div class="form-row">
+                                <label class="form-label">
+                                    <input type="checkbox" x-model="form.smtp_implicit_tls"> Implicit TLS on this port (SMTPS)
+                                </label>
+                                <small>Tick only if your provider's SMTP port is not 465 but still expects TLS from the first byte.</small>
+                            </div>
                         </details>
                         <div x-show="errorMsg" x-cloak class="alert alert--error" style="margin-top:10px;font-size:13px" x-text="errorMsg"></div>
                         <div class="form-actions">
@@ -247,6 +253,7 @@ function addAccountForm() {
             imap_tls: true,
             smtp_server: '',
             smtp_port: 0,
+            smtp_implicit_tls: false,
         },
         submit() {
             this.loading = true;

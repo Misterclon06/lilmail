@@ -414,13 +414,14 @@ func (h *AuthHandler) CreateSMTPClientForAccount(entry AccountEntry) (*api.SMTPC
 // failed to send; and insecure_skip_verify, meant for the operator's own
 // self-signed server, would silently turn off certificate checking for a
 // third-party host. Such accounts get the port convention (465 = implicit TLS,
-// otherwise STARTTLS) and always verify certificates.
+// otherwise STARTTLS; SMTPImplicitTLS forces implicit TLS on another port) and
+// always verify certificates.
 func smtpModeForAccount(entry AccountEntry, cfg *config.Config) (startTLS, skipVerify bool) {
 	usesGlobal := strings.EqualFold(entry.SMTPServer, cfg.SMTP.Server) && entry.SMTPPort == cfg.SMTP.GetPort()
 	if usesGlobal {
 		return cfg.SMTP.UseSTARTTLS, cfg.SMTP.InsecureSkipVerify
 	}
-	return entry.SMTPPort != 465, false
+	return entry.SMTPPort != 465 && !entry.SMTPImplicitTLS, false
 }
 
 // CalDAVClient returns a CalDAVClient authenticated for the current session.
