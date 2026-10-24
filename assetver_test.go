@@ -46,3 +46,21 @@ func TestEmbeddedAssetsGetVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestCompressibleAsset(t *testing.T) {
+	for path, want := range map[string]bool{
+		"/assets/css/mail.css":        true,
+		"/assets/vendor/htmx.min.js":  true,
+		"/assets/lilmail-favicon.svg": true,
+		"/assets/site.webmanifest":    true,
+		"/assets/icon-192.png":        false,
+		"/assets/og-image.png":        false,
+		"/assets/noextension":         false,
+		"/inbox":                      false,
+		"/api/folder/INBOX/emails":    false,
+	} {
+		if got := compressibleAsset(path); got != want {
+			t.Errorf("compressibleAsset(%q) = %v, want %v", path, got, want)
+		}
+	}
+}

@@ -321,7 +321,10 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 
-<!-- Define the email-rows sub-template so email-list.html can reuse it -->
+<!-- The one definition of the list rows: the inbox page renders it inline and
+     partials/email-list.html (HTMX swaps, search, paging) renders the same template.
+     Rows carry data-id/data-folder/data-account and call openMessage() (app.js); no
+     value is interpolated into inline JS, and no token is embedded per row. -->
 {{define "email-rows"}}
 {{if .Total}}<div class="list-count">{{.Total}} messages</div>{{end}}
 {{if .Threads}}
@@ -333,19 +336,8 @@ document.addEventListener('DOMContentLoaded', function() {
     <div x-data="{ open: false }" style="border-bottom:1px solid var(--c-border-soft)">
         <!-- Thread summary row -->
         <div class="email-row{{if $unread}} is-unread{{end}}"
-             @click="if({{$thread.Count}} > 1) { open = !open } else {
-                 showEmailViewer = true;
-                 htmx.ajax('GET', '/api/email/{{$latest.ID}}',
-                     {target:'#email-viewer-pane', swap:'innerHTML',
-                      headers:{'X-Folder':'{{$.CurrentFolder}}','Authorization':'Bearer {{$.Token}}'{{if $latest.AccountEmail}},'X-Account-Email':'{{$latest.AccountEmail}}'{{end}}
-                      }});
-                 if(window.innerWidth < 1024) {
-                     htmx.ajax('GET', '/api/email/{{$latest.ID}}',
-                         {target:'#email-viewer-pane-mobile', swap:'innerHTML',
-                          headers:{'X-Folder':'{{$.CurrentFolder}}','Authorization':'Bearer {{$.Token}}'{{if $latest.AccountEmail}},'X-Account-Email':'{{$latest.AccountEmail}}'{{end}}
-                          }});
-                 }
-             }">
+             data-id="{{$latest.ID}}" data-folder="{{$.CurrentFolder}}"{{if $latest.AccountEmail}} data-account="{{$latest.AccountEmail}}"{{end}}
+             @click="{{if gt $thread.Count 1}}open = !open{{else}}showEmailViewer = true; openMessage($el){{end}}">
             {{if $unread}}<span class="email-row__unread-dot"></span>{{end}}
             <div class="avatar">{{initial $latest.FromName $latest.From}}</div>
             <div class="email-row__body">
@@ -396,18 +388,8 @@ document.addEventListener('DOMContentLoaded', function() {
             {{$mUnread := true}}
             {{range $m.Flags}}{{if eq . "\\Seen"}}{{$mUnread = false}}{{end}}{{end}}
             <div class="thread-msg"
-                 hx-get="/api/email/{{$m.ID}}"
-                 hx-target="#email-viewer-pane"
-                 hx-swap="innerHTML"
-                 hx-headers='{"X-Folder": "{{$.CurrentFolder}}", "Authorization": "Bearer {{$.Token}}"{{if $m.AccountEmail}}, "X-Account-Email": "{{$m.AccountEmail}}"{{end}}}'
-                 hx-indicator="#list-spinner"
-                 @click="showEmailViewer = true;
-                         if(window.innerWidth < 1024) {
-                             htmx.ajax('GET', '/api/email/{{$m.ID}}',
-                                 {target:'#email-viewer-pane-mobile', swap:'innerHTML',
-                                  headers:{'X-Folder':'{{$.CurrentFolder}}','Authorization':'Bearer {{$.Token}}'{{if $m.AccountEmail}},'X-Account-Email':'{{$m.AccountEmail}}'{{end}}
-                                  }});
-                         }">
+                 data-id="{{$m.ID}}" data-folder="{{$.CurrentFolder}}"{{if $m.AccountEmail}} data-account="{{$m.AccountEmail}}"{{end}}
+                 @click="showEmailViewer = true; openMessage($el)">
                 <div class="avatar avatar--sm">{{initial $m.FromName $m.From}}</div>
                 <div class="thread-msg__body">
                     <div class="thread-msg__top">
@@ -430,23 +412,13 @@ document.addEventListener('DOMContentLoaded', function() {
     {{$unread := true}}
     {{range .Flags}}{{if eq . "\\Seen"}}{{$unread = false}}{{end}}{{end}}
     <div class="email-row{{if $unread}} is-unread{{end}}"
-         hx-get="/api/email/{{.ID}}"
-         hx-target="#email-viewer-pane"
-         hx-swap="innerHTML"
-         hx-headers='{"X-Folder": "{{$.CurrentFolder}}", "Authorization": "Bearer {{$.Token}}"{{if .AccountEmail}}, "X-Account-Email": "{{.AccountEmail}}"{{end}}}'
-         hx-indicator="#list-spinner"
-         @click="showEmailViewer = true;
-                 if(window.innerWidth < 1024) {
-                     htmx.ajax('GET', '/api/email/{{.ID}}',
-                         {target:'#email-viewer-pane-mobile', swap:'innerHTML',
-                          headers:{'X-Folder':'{{$.CurrentFolder}}','Authorization':'Bearer {{$.Token}}'{{if .AccountEmail}},'X-Account-Email':'{{.AccountEmail}}'{{end}}
-                          }});
-                 }">
+         data-id="{{.ID}}" data-folder="{{$.CurrentFolder}}"{{if .AccountEmail}} data-account="{{.AccountEmail}}"{{end}}
+         @click="showEmailViewer = true; openMessage($el)">
         {{if $unread}}<span class="email-row__unread-dot"></span>{{end}}
         <button class="email-row__check" title="Select"
-                @click.stop="$store.mail && $store.mail.toggleSelect('{{.ID}}')"
-                :class="{ 'is-checked': $store.mail && $store.mail.isSelected('{{.ID}}') }"
-                :aria-pressed="$store.mail && $store.mail.isSelected('{{.ID}}')">
+                @click.stop="$store.mail && $store.mail.toggleSelect($el.closest('[data-id]').dataset.id)"
+                :class="{ 'is-checked': $store.mail && $store.mail.isSelected($el.closest('[data-id]').dataset.id) }"
+                :aria-pressed="$store.mail && $store.mail.isSelected($el.closest('[data-id]').dataset.id)">
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
         </button>
         <div class="avatar">{{initial .FromName .From}}</div>
@@ -479,12 +451,21 @@ document.addEventListener('DOMContentLoaded', function() {
 
 {{else}}
     <div class="empty-state">
+        {{if .SearchQuery}}
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/>
+        </svg>
+        <p class="empty-state__title">No results</p>
+        <p class="empty-state__sub">No messages matched &ldquo;{{.SearchQuery}}&rdquo;.</p>
+        {{else}}
         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.2"
                 d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
         </svg>
         <p class="empty-state__title">All clear</p>
         <p class="empty-state__sub">No messages in this folder.</p>
+        {{end}}
     </div>
 {{end}}
 
@@ -492,7 +473,7 @@ document.addEventListener('DOMContentLoaded', function() {
     <div class="list-note">Showing the 1000 most recent messages across all accounts. Open a single account's folder to reach older mail.</div>
 {{end}}
 {{if .HasMore}}
-    <div class="list-more" hx-get="/api/folder/{{.CurrentFolder | urlEncode}}/emails?page={{.NextPage}}{{if .Unified}}&unified=1{{end}}"
+    <div class="list-more" hx-get="{{if .SearchQuery}}/api/search?q={{.SearchQuery | urlquery}}&folder={{.CurrentFolder | urlquery}}&mods={{.SearchMods | urlquery}}&page={{.NextPage}}{{if .Unified}}&unified=1{{end}}{{else}}/api/folder/{{.CurrentFolder | urlEncode}}/emails?page={{.NextPage}}{{if .Unified}}&unified=1{{end}}{{end}}"
          hx-trigger="intersect once" hx-swap="outerHTML" hx-indicator="#list-spinner"></div>
 {{end}}
 {{end}}

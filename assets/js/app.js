@@ -76,6 +76,27 @@ document.addEventListener('alpine:initialized', function () {
     return m ? decodeURIComponent(m[1]) : '';
 };
 
+/**
+ * Open the message a list row stands for. The row carries data-id (UID),
+ * data-folder and, in the unified view, data-account: plain data attributes, so
+ * nothing from the mailbox is ever spliced into inline JS and no token is
+ * embedded per row (the bearer token is added by the htmx:configRequest handler
+ * below).
+ * @param {HTMLElement} el
+ */
+window.openMessage = function (el) {
+    const d = el.dataset;
+    if (!d.id) return;
+    /** @type {Record<string, string>} */
+    const headers = { 'X-Folder': d.folder || 'INBOX' };
+    if (d.account) headers['X-Account-Email'] = d.account;
+    const url = '/api/email/' + encodeURIComponent(d.id);
+    htmx.ajax('GET', url, { target: '#email-viewer-pane', swap: 'innerHTML', headers: headers });
+    if (window.innerWidth < 1024) {
+        htmx.ajax('GET', url, { target: '#email-viewer-pane-mobile', swap: 'innerHTML', headers: headers });
+    }
+};
+
 document.body.addEventListener('htmx:configRequest', function (evt) {
     const tokenEl = document.getElementById('app-token');
     const token = tokenEl instanceof HTMLElement && tokenEl.dataset.token ? tokenEl.dataset.token : '';

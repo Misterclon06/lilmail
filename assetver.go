@@ -54,3 +54,13 @@ func assetCacheControl(versioned bool) string {
 	}
 	return "public, max-age=3600"
 }
+
+// compressibleAsset reports whether a /assets path is text worth compressing.
+// Images (png/ico/webp/jpg) are already compressed; svg is XML text.
+func compressibleAsset(path string) bool {
+	switch strings.ToLower(path[strings.LastIndex(path, ".")+1:]) {
+	case "css", "js", "svg", "webmanifest", "json", "txt", "map":
+		return true
+	}
+	return false
+}

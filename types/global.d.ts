@@ -48,6 +48,8 @@ declare global {
   }
 
   interface Window {
+    /** Opens the message of a list row (data-id/data-folder/data-account); see app.js. */
+    openMessage(el: HTMLElement): void;
     lilmailPush: {
       /** Requests Notification permission, then registers + subscribes. */
       enable: () => Promise<PushSubscriptionJSON>;
@@ -59,6 +61,16 @@ declare global {
       isSubscribed: () => Promise<boolean>;
     };
   }
+
+  // htmx is loaded from assets/vendor/htmx.min.js (untyped, vendored); only
+  // the ajax() call openMessage() makes is declared.
+  var htmx: {
+    ajax(
+      verb: string,
+      path: string,
+      context: { target: string; swap: string; headers: Record<string, string> },
+    ): Promise<void>;
+  };
 
   // Alpine is loaded from assets/vendor/alpine.min.js (untyped, vendored — see
   // assetsAllowedUnreferenced / eslint ignores). This declares only the

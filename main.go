@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/csrf"
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
@@ -290,6 +291,17 @@ func main() {
 		c.Set("Cache-Control", assetCacheControl(c.Query("v") != ""))
 		return c.Next()
 	})
+	// Compress static text assets only (css/js/svg/manifest: ~190 KB cold). Never
+	// the dynamic HTML: those pages carry the bearer token and mailbox content
+	// next to text an attacker can influence (search query, folder name, the body
+	// of a mail they sent), the precondition for a BREACH-style compression
+	// side channel. Static assets contain no secrets. Already-compressed images
+	// are skipped. Shrinking the HTML is done by sending less of it (list rows
+	// use data-* attributes), not by compressing it.
+	app.Use("/assets", compress.New(compress.Config{
+		Level: compress.LevelDefault,
+		Next:  func(c *fiber.Ctx) bool { return !compressibleAsset(c.Path()) },
+	}))
 	app.Use("/assets", filesystem.New(filesystem.Config{
 		Root:         http.FS(assetsSub),
 		NotFoundFile: "",
