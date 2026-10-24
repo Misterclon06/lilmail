@@ -11,6 +11,32 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ### Added
 
+- **Infinite-scroll pagination for the inbox, folders and search results.**
+  The web UI used to render only the newest 50 messages of a folder, so older
+  mail was unreachable. Lists now load 50 messages per page as you scroll
+  (`?page=N`), show the folder total ("3005 messages"), and search results page
+  the same way. The unified inbox pages too, but each account is asked for
+  `page × 50` messages and the merged list stops at 1 000 messages (page 20),
+  with a note saying so when older mail remains. Pages past the end return an
+  empty body instead of repeating the last one.
+- **Choose which fields free-text search looks at.** The search box has a
+  "Search in…" menu (Subject, From, To, Cc, Body), remembered per folder in the
+  browser's `localStorage` (nothing is stored server-side). New `body:word` and
+  `text:word` operators run a body / header+body scan for a single term.
+- **Per-account TLS for additional accounts.** IMAP: a "Use TLS" checkbox
+  (`imap_tls` in `POST /api/accounts`); plain IMAP is accepted only for
+  loopback hosts or the server you configured with `[imap] tls = false`.
+  SMTP: an account with its own server uses the port convention (465 = implicit
+  TLS, otherwise STARTTLS) and can force implicit TLS on another port with
+  `smtp_implicit_tls`. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#per-account-tls).
+- **`LILMAIL_TIMING=1`** logs how long each IMAP connect+login and each list /
+  message / search command took, to see where request time goes before deciding
+  whether a connection pool is worth its complexity.
+- **Cache-busting URLs for the embedded css/js** (`/assets/…?v=<content hash>`),
+  computed from the embedded files at startup (no build step).
+- **`GET /api/email/:id/body`** serves a message body as its own document with
+  its own `Content-Security-Policy`, used by "Display images" (see Fixed).
+
 - **The mail AI assistant can now run llmux in-process instead of calling a
   gateway.** `[ai] mode = "embedded"` links llmux
   (`github.com/vul-os/llmux`) into LilMail as a Go library: no gateway to
@@ -49,6 +75,83 @@ Versioning: [Semantic Versioning](https://semver.org/)
   `http.RoundTripper` and asserts zero round trips and no extra goroutines
   across every AI route, with the same recorder proven against both live modes
   so the zero means something.
+
+### Changed
+
+- **Free-text search matches Subject and From instead of the whole message.**
+  A bare word (or a "quoted phrase") used to run IMAP `SEARCH TEXT`, which scans
+  every message body and is slow on servers without a full-text index. It now
+  runs `OR HEADER SUBJECT … HEADER FROM …`, like Roundcube's default. **This also
+  changes `/v1/search`**: `q=invoice` no longer matches a word that appears only
+  in the body — use `body:invoice` or `text:invoice`. Operators
+  (`from:`, `to:`, `subject:`, `is:`, `has:`, `before:`, …) are unchanged. The
+  search box now runs on Enter instead of on every pause while typing, and an
+  in-flight search is cancelled by the next one.
+- **Conversation threads in the web list are built from the page being shown**,
+  not from every header ever cached for the folder. A conversation that
+  straddles a page boundary therefore appears as two rows, one per page, but
+  every message is listed exactly once. In the unified inbox each account is
+  threaded separately, so identical subjects in two accounts are no longer fused.
+- **IMAP and SMTP connections now have timeouts.** IMAP: 10 s to connect and
+  greet, 60 s per command. SMTP: 10 s to connect and greet, 2 minutes for the
+  whole conversation. A silent or mismatched server now returns an error
+  instead of hanging the request.
+- **The login page tells "wrong password" (401) from "mail server unreachable"
+  (503)** instead of one "Invalid credentials or server error".
+- **List rows are lighter**: they carry `data-id` / `data-folder` /
+  `data-account` and call one `openMessage()` function instead of ~600 bytes of
+  inline JavaScript plus the bearer token per row. The inbox HTML is ~34 %
+  smaller and a scroll page ~47 % smaller.
+- **Static assets**: css/js are served `immutable` for a year under their
+  versioned URL (unversioned icons and the manifest: 1 hour) and are compressed
+  (gzip/brotli). Dynamic HTML is deliberately **not** compressed; see Security.
+
+### Fixed
+
+- **"Display images" never loaded remote images or CSS.** The reading pane is a
+  `srcdoc` iframe, which inherits the app's `img-src 'self' data: blob:` policy,
+  so the browser refused every remote resource and the frame kept the layout
+  space of broken images. The button now loads the message from
+  `/api/email/:id/body?images=1`, a real document with its own CSP, so images,
+  backgrounds and remote stylesheets all load. `* { max-width: 100% }` (which
+  squeezed table layouts) was removed from the frame stylesheet.
+- **IMAP IDLE never reported new mail.** The watcher issued `FETCH` while IDLE
+  held the connection. It now ends IDLE, fetches, and resumes.
+- **Enabling `[notifications]` crashed the server** on the first `/events`
+  subscription: the watcher goroutine used a Fiber context that had already been
+  recycled. The IMAP client is now created inside the request.
+- **"Add account" and "Save draft" always failed with 403**: their `fetch()`
+  calls did not send `X-CSRF-Token`.
+- **Replies to a message outside the fetched window vanished** from the thread
+  list (a stale parent pointer in the JWZ pruning step).
+- **Previews of multipart messages showed MIME boundaries** (`--B1 Content-Type:
+  text/html …`), and single-part messages lost their first paragraph.
+- **Search always searched INBOX**, whatever folder was open.
+- **Clearing the search box showed a JSON error** instead of the folder list.
+- **A session whose cache directory had been removed failed every page with a
+  500**; `folders.json` is now rebuilt from IMAP.
+- **Additional accounts could not use a plain-IMAP server**, and an SMTP account
+  on port 465 failed under the global `use_starttls = true` (and the reverse).
+
+### Security
+
+- Remote content is blocked with a Content-Security-Policy on every message
+  document (data: images only until you opt in; images, styles and fonts — no
+  frames, scripts or forms — after), `<meta>` and `<base>` tags are stripped from
+  message bodies (a `meta refresh` could navigate the frame), and the opt-in
+  document sends `Referrer-Policy: no-referrer`.
+- List rows no longer embed the bearer token, and no mailbox value (folder name,
+  account address, UID) is interpolated into inline JavaScript; they travel as
+  escaped `data-*` attributes. The viewer's mark-unread and delete buttons send
+  the folder as `?folder=` instead of inside a JSON header.
+- An additional account on its own SMTP server no longer inherits the global
+  `insecure_skip_verify`; certificates are always verified for it.
+- Plain (non-TLS) IMAP for an additional account is restricted to loopback hosts
+  and the operator-configured `tls = false` server.
+- Only static assets are compressed. Dynamic pages carry the bearer token and
+  mailbox content next to text an attacker can influence (search query, folder
+  name, a mail they sent), the precondition for a BREACH-style compression side
+  channel. If you run behind a reverse proxy, do not let it gzip `text/html`.
 
 ### Removed
 

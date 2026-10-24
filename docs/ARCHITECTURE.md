@@ -106,7 +106,33 @@ that receives a 401/NO AUTHENTICATE.
 `handlers/api/email.go` creates IMAP clients from session credentials on each
 request using `emersion/go-imap`. There is no persistent connection pool —
 connections are opened, used, and closed per request. This keeps memory usage
-low and makes the server stateless with respect to IMAP state.
+low and makes the server stateless with respect to IMAP state. (A pool was
+considered and not built: an IMAP connection has one selected mailbox, so it
+would have to be handed to one request at a time, health-checked, keyed by the
+verified session identity, and closed on logout — state and a cross-user leak
+risk for a gain that depends on the server's login cost. Set `LILMAIL_TIMING=1`
+to measure that cost first.)
+
+Connections carry deadlines: 10 s to connect and receive the greeting
+(`dialIMAP`, `imapDialTimeout`) and 60 s per command (`imapCmdTimeout`). go-imap
+applies `Client.Timeout` to every command, which would kill IDLE, so
+`WatchInbox` resets it to 0. IMAP open errors are classified as `api.ErrConnect`
+(unreachable, TLS mismatch, timeout) or `api.ErrLogin` (credentials rejected) so
+the login page can tell them apart.
+
+Message lists are paged by IMAP sequence number: `FetchMessagesPagedTotal` takes
+the folder size from the `SELECT` response and fetches the window ending
+`offset` from the newest; the web layer asks for one extra message to learn
+whether a next page exists. Search returns UIDs only, so a search page costs one
+`SEARCH` plus a `FETCH` of that page (`SearchMessagesPaged`, `searchWindow`).
+Free text maps to `OR HEADER SUBJECT … HEADER FROM …` (or the fields chosen in the
+UI, `NormalizeSearchMods`); `body:` / `text:` opt into a body scan.
+
+SMTP connections are opened by one `SMTPClient.dial()` (implicit TLS, or plain
+TCP + `EHLO` + `STARTTLS`) with a 10 s connect/greeting limit and a 2-minute
+session limit. For additional accounts `smtpModeForAccount`
+(`handlers/web/auth.go`) picks the transport per account — see
+[Per-account TLS](CONFIGURATION.md#per-account-tls).
 
 SMTP sending lives in `handlers/api/stmpClient.go`, with the outgoing MIME
 assembled by `handlers/api/mime_builder.go` (multipart/mixed + multipart/related
@@ -120,11 +146,26 @@ Fetched email metadata is written to the on-disk cache (`[cache].folder`) as
 JSON files, one per folder. MIME bodies are cached separately. Cache keys are
 based on the sanitized username and folder name (path-traversal-safe).
 
+The sidebar's `folders.json` is written at login; if it is missing or unreadable
+(cache directory cleared, a session that outlived it) `loadFolders` rebuilds it
+from IMAP instead of failing the page.
+
 ### Conversation threading
 
 Thread graphs are built using the JWZ algorithm over `Message-ID`, `References`
-and `In-Reply-To` headers, and stored in bbolt by `handlers/api/threadstore.go`,
-which opens its own database file directly.
+and `In-Reply-To` headers (`handlers/api/threading.go`).
+
+The web message list threads **the page being shown only** (`api.ThreadMessages`
+on that page's messages; the unified inbox threads each account separately, since
+UIDs and Message-IDs are per mailbox and subject grouping must not fuse unrelated
+mail from two accounts). The bbolt header cache in
+`handlers/api/threadstore.go` is not used for lists: it unions every header ever
+cached for a folder, which repeated earlier pages' messages once the list became
+paged and hid replies that threaded into a row rendered before they were fetched.
+Page-local threading is deterministic — every message appears exactly once — at
+the cost that a conversation straddling a page boundary shows as two rows.
+(`threadstore.go` still backs the Drafts list, and opens its own database file
+directly.)
 
 (`storage/session.go` is unrelated to threading despite the neighbouring name:
 it is `FileStorage`, the fiber session store, and it writes one JSON file per
@@ -208,7 +249,12 @@ Two subsystems live inside this package:
 
 When `[notifications].enabled = true`, a per-session IMAP IDLE goroutine is
 started after login. New-mail events are pushed to a channel that drives an SSE
-response on `GET /events`. The browser Web Notifications API is triggered from
+response on `GET /events`. The watcher's IMAP client is created inside the
+`/events` request (`NotificationHub.Subscribe`): Fiber recycles its request
+context as soon as a handler returns, so the goroutine must never touch it.
+`WatchInbox` runs IDLE until the server announces more messages, ends IDLE,
+fetches the new envelopes, and resumes — a `FETCH` cannot run while IDLE holds
+the connection. The browser Web Notifications API is triggered from
 client-side JavaScript listening to the SSE stream.
 
 Web Push uses the `SherClockHolmes/webpush-go` library. VAPID keys are
@@ -235,6 +281,34 @@ The UI is server-rendered Go templates enhanced with
 [Alpine.js](https://alpinejs.dev/) (inline interactivity). All vendor JS is
 checked in under `assets/vendor/` — there is no npm or build step. CSS is
 hand-written in `assets/css/mail.css` (~77 KB) with a dark-mode theme.
+
+**List rows.** The rows of the message list are one template, `email-rows`
+(`templates/inbox.html`), rendered inline by the inbox page and by
+`partials/email-list.html` for every HTMX swap, search and next page. A row
+carries `data-id`, `data-folder` and (unified view) `data-account`, and its
+`@click` is a fixed string that calls `openMessage()` (`assets/js/app.js`). No
+mailbox value is spliced into inline JavaScript and no token is embedded per row;
+the bearer token and CSRF token are added to htmx requests by the
+`htmx:configRequest` handler. The next page is a sentinel element with
+`hx-trigger="intersect once"` — htmx 1.9's `revealed` only listens to `window`
+scroll, not to a scrolling container.
+
+**Message bodies.** HTML mail renders in an `<iframe sandbox>` (no
+`allow-scripts`). Remote content is neutralised server-side and the document
+carries its own `Content-Security-Policy` (`data:` images only until the user
+opts in). "Display images" cannot just change the `srcdoc` frame — a `srcdoc`
+document inherits the app's CSP (`img-src 'self' data: blob:`) and the browser
+would refuse every remote resource — so it points the frame at
+`GET /api/email/:id/body?images=1`, which returns the body as a real document
+with its own CSP header and `Referrer-Policy: no-referrer`.
+
+**Static assets.** The `asset` template function (`assetver.go`) appends
+`?v=<sha256 prefix of the embedded file>` to css/js URLs. Versioned URLs are served
+`Cache-Control: public, max-age=31536000, immutable`; unversioned ones (icons,
+manifest) for an hour. `css/js/svg/manifest` are compressed; **dynamic HTML is not**
+— those pages hold the bearer token and mailbox content next to attacker-influenced
+text, the precondition for a BREACH-style compression side channel. Shrinking the
+HTML is done by sending less of it, not by compressing it.
 
 ## Build and embedding
 

@@ -99,6 +99,30 @@ implemented for **SMTP only** (`[smtp] use_starttls`).
 There is no `insecure_skip_verify` for IMAP. A self-signed IMAP certificate will
 fail the handshake; only the SMTP client exposes that escape hatch.
 
+### Timeouts and where request time goes
+
+lilmail opens one IMAP connection per request (TCP + TLS + `LOGIN`, then the
+command), with no connection pool. Every connect has a **10 s** limit for the
+dial, TLS handshake and server greeting, and each IMAP command a **60 s** limit
+(it also caps a single attachment download), so an unresponsive server returns an
+error instead of hanging the request. The IDLE watcher is exempt: IDLE
+legitimately blocks for long periods.
+
+To see whether login or the command dominates, start lilmail with
+`LILMAIL_TIMING=1`. It logs one line per connect and per list / message / search
+command, for example:
+
+```
+timing: imap connect+login took 38ms
+timing: list fetch INBOX took 12ms
+```
+
+When the IMAP server is on the **same machine**, the cheapest improvements need
+no code: `server = "127.0.0.1"`, `port = 143`, `tls = false` (loopback needs no
+encryption and skips the TLS handshake — never do this for a remote server), and,
+for Dovecot, an auth cache (`auth_cache_size`, `auth_cache_ttl`) so each login
+does not re-verify a password hash.
+
 ---
 
 ## `[smtp]`
@@ -109,6 +133,12 @@ fail the handshake; only the SMTP client exposes that escape hatch.
 | `port` | int | `587` | SMTP port (`587` STARTTLS / `465` implicit TLS) |
 | `use_starttls` | bool | `true` | Use STARTTLS upgrade. Set `false` for implicit TLS (port 465) |
 | `insecure_skip_verify` | bool | `false` | Skip TLS certificate verification. For self-signed certs only |
+
+Connecting and the server greeting must complete within **10 s**, and the whole
+SMTP conversation (authentication, `DATA` with attachments, `QUIT`) within
+**2 minutes**. A server that accepts the connection and then stays silent — for
+example `use_starttls = true` pointed at an implicit-TLS port — fails after 10 s
+with `smtp client init failed: … i/o timeout` rather than hanging.
 
 ---
 
@@ -448,6 +478,37 @@ IMAP/SMTP accounts from the Settings page.
 |-----|------|---------|-------------|
 | `enabled` | bool | `false` | Master switch |
 | `store_file` | string | `"accounts.db"` | bbolt database for encrypted additional-account credentials (auto-created) |
+
+### Per-account TLS
+
+Each additional account carries its own transport settings; Settings → Add
+account → *Advanced* exposes them.
+
+| Field (`POST /api/accounts`) | Default | Meaning |
+|---|---|---|
+| `imap_server`, `imap_port` | the global `[imap]` values | IMAP endpoint of the account |
+| `imap_tls` | `true` | Implicit TLS. `false` connects without encryption |
+| `smtp_server`, `smtp_port` | the global `[smtp]` values | SMTP endpoint of the account |
+| `smtp_implicit_tls` | `false` | Force TLS from the first byte (SMTPS) on a port other than 465 |
+
+- **IMAP.** An account left on the global server inherits `[imap] tls`. An
+  account with its own server uses `imap_tls` (TLS unless you untick it). Plain
+  (non-TLS) IMAP is accepted **only** for loopback hosts (`localhost`,
+  `127.0.0.0/8`, `::1` — a literal check, no DNS lookup) or for the exact server
+  you configured with `[imap] tls = false`; anything else is rejected with `400`,
+  because the password would cross the network in clear text.
+- **SMTP.** An account on the global SMTP server (same host and port) uses
+  `[smtp] use_starttls` and `insecure_skip_verify`. An account with its own server
+  follows the port convention — **465 = implicit TLS, any other port = STARTTLS**
+  — unless `smtp_implicit_tls` is set, and its certificate is **always verified**:
+  the global `insecure_skip_verify` is meant for your own self-signed server and
+  is not applied to third-party hosts.
+- Accounts saved before these fields existed keep their behaviour (TLS IMAP,
+  port-convention SMTP).
+
+The unified inbox lists the newest `page × 50` messages of every account merged by
+date, up to **1 000 messages (20 pages)**; a note at the end of the list says when
+older mail remains. Each account is threaded separately.
 
 ### Account routes (registered only when `enabled = true`)
 

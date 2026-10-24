@@ -611,8 +611,11 @@ curl -b cookies.txt 'http://localhost:3000/v1/messages?folder=INBOX&limit=50'
 # Read one message
 curl -b cookies.txt 'http://localhost:3000/v1/messages/42?folder=INBOX'
 
-# Full-text search
+# Search subject / sender for a word (see "Search syntax" below)
 curl -b cookies.txt 'http://localhost:3000/v1/search?folder=INBOX&q=invoice'
+
+# Search message bodies for a word
+curl -b cookies.txt 'http://localhost:3000/v1/search?folder=INBOX&q=body:invoice'
 
 # Mark as read (\Seen)  /  star (\Flagged)
 curl -b cookies.txt -X PATCH 'http://localhost:3000/v1/messages/42/flags?folder=INBOX' \
@@ -657,6 +660,27 @@ curl -b cookies.txt -X POST http://localhost:3000/v1/accounts \
 # Unified inbox across the primary + all connected accounts
 curl -b cookies.txt 'http://localhost:3000/v1/unified?folder=INBOX&limit=50'
 ```
+
+### Search syntax (`/v1/search`, and the web search box)
+
+`q` is a Gmail-style query. Terms are ANDed; a leading `-` negates a term.
+
+| Term | Matches |
+|------|---------|
+| `word`, `"a phrase"` | **Subject or From** contains it (IMAP `OR HEADER SUBJECT … HEADER FROM …`) |
+| `from:x`, `to:x`, `cc:x`, `bcc:x`, `subject:x` | that header contains `x` |
+| `body:x` | the body contains `x` (scans every message; slow without a server-side full-text index) |
+| `text:x` | header or body contains `x` (same cost) |
+| `is:unread` / `read` / `starred` / `unstarred` | flag filters |
+| `has:attachment` | top-level `multipart/*` (best effort) |
+| `in:<folder>` | search that mailbox instead of `folder` |
+| `before:`, `after:` (`YYYY/MM/DD`), `older_than:`, `newer_than:` (`7d`, `2m`, `1y`) | date filters |
+
+**Behaviour change:** a bare word used to run `SEARCH TEXT` (headers *and* body).
+It now matches Subject and From only, because a body scan is slow on servers
+without a full-text index. Use `body:` or `text:` to search message bodies. Unknown
+operators and unparseable values degrade to a free-text term. The web UI lets the
+user choose the free-text fields (Subject, From, To, Cc, Body) per folder.
 
 ### `Email` shape (abridged)
 

@@ -54,7 +54,11 @@ mailbox; nothing is provisioned anywhere when you do.
 - **OAuth2 / OpenID Connect** — authorization-code flow, PKCE (S256), automatic
   refresh-token handling, XOAUTH2 and OAUTHBEARER SASL; password login still works
 - **Conversation threading** — JWZ algorithm (`References` / `In-Reply-To` /
-  `Message-ID`) backed by an embedded [bbolt](https://github.com/etcd-io/bbolt) store
+  `Message-ID`), computed per page of the list
+- **Paged lists and fast search** — infinite-scroll pages of 50 for every folder
+  and for search results; free text searches Subject and From (cheap on any IMAP
+  server), with a per-folder "Search in…" menu and `body:` / `text:` operators for
+  a body scan. See [docs/API.md](docs/API.md#search-syntax-v1search-and-the-web-search-box)
 - **Compose** — plain-text and HTML rich-text (contenteditable toolbar), file
   attachments (multipart/mixed MIME) with `cid:` inline images
   (multipart/related), scheduled send (send-later, `/v1`), drafts with 30-second
